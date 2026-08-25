@@ -14,10 +14,39 @@ public final class BazelBinary {
             "/usr/local/bin/bazelisk",
             "/usr/local/bin/bazel");
 
+    /*
+        Resolution stats every PATH entry twice. It used to run on every single process launch, which
+        on an import that spawned hundreds of bazel calls meant hundreds of pointless directory
+        scans. The answer cannot change while the server is running, so it is resolved once.
+     */
+    private static volatile String resolved;
+
     private BazelBinary() {
     }
 
-    public static String resolve() {
+    public static String resolve(BazelSettings settings) {
+        if (settings != null && !settings.getBinary().isBlank()
+                && isExecutable(settings.getBinary())) {
+            return settings.getBinary();
+        }
+        String cached = resolved;
+        if (cached != null) {
+            return cached;
+        }
+        synchronized (BazelBinary.class) {
+            if (resolved == null) {
+                resolved = search();
+                BazelLog.info("Bazel: using binary " + resolved);
+            }
+            return resolved;
+        }
+    }
+
+    public static synchronized void invalidate() {
+        resolved = null;
+    }
+
+    private static String search() {
         String configured = System.getProperty(SYSTEM_PROPERTY);
         if (isExecutable(configured)) {
             return configured;

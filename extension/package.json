@@ -2,7 +2,7 @@
   "name": "bazel-java",
   "displayName": "Bazel Java Project Importer",
   "description": "Imports Bazel java targets into the Java Language Server using bazel aquery",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "publisher": "audienzz",
   "license": "MIT",
   "engines": {
@@ -15,12 +15,32 @@
     "redhat.java"
   ],
   "activationEvents": [
-    "onLanguage:java"
+    "onLanguage:java",
+    "workspaceContains:MODULE.bazel",
+    "workspaceContains:WORKSPACE.bazel",
+    "workspaceContains:WORKSPACE"
   ],
   "main": "./extension.js",
   "contributes": {
     "javaExtensions": [
       "./server/ch.audienzz.bazel.jdtls.jar"
+    ],
+    "commands": [
+      {
+        "command": "bazelJava.refreshClasspath",
+        "title": "Bazel: Refresh Classpath",
+        "category": "Bazel Java"
+      },
+      {
+        "command": "bazelJava.showImportReport",
+        "title": "Bazel: Show Import Report",
+        "category": "Bazel Java"
+      },
+      {
+        "command": "bazelJava.buildClasspath",
+        "title": "Bazel: Build Classpath",
+        "category": "Bazel Java"
+      }
     ],
     "configuration": {
       "title": "Bazel Java",
@@ -29,6 +49,70 @@
           "type": "string",
           "default": "",
           "description": "Absolute path to the bazel or bazelisk binary. When empty, PATH is searched."
+        },
+        "bazelJava.targets": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "markdownDescription": "Target patterns to import, for example `//services/...`. Empty means the whole repository, or the `directories:` block of `.bazelproject` when `#bazelJava.useBazelProject#` is on. Narrowing this is the single biggest win on a large monorepo."
+        },
+        "bazelJava.excludeTargets": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "markdownDescription": "Target patterns to subtract from the imported set, for example `//platform/infra/...`."
+        },
+        "bazelJava.useBazelProject": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Read the import scope from the `directories:` block of `.bazelproject` when `#bazelJava.targets#` is empty."
+        },
+        "bazelJava.importMode": {
+          "type": "string",
+          "enum": ["lazy", "eager"],
+          "default": "lazy",
+          "markdownDescription": "`lazy` imports the configured scope and, when a java file outside it is opened, provisions that one package on demand. `eager` imports the configured scope and nothing else. With no scope configured the two are identical, since everything is already in scope."
+        },
+        "bazelJava.maxProjects": {
+          "type": "number",
+          "default": 300,
+          "description": "Safety valve. Above this many projects the import is capped and a warning is logged, since each project costs an Eclipse project plus a classpath container."
+        },
+        "bazelJava.groupSourceRoots": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Merge the `src/main` and `src/test` targets of one package into a single project with two source folders. Turning this off restores one project per target."
+        },
+        "bazelJava.buildOnImport": {
+          "type": "string",
+          "enum": ["background", "off"],
+          "default": "background",
+          "markdownDescription": "`aquery` reports the jars a build *would* consume, not jars that are current. A jar produced before its inputs last changed is still on disk and gets indexed, so the IDE shows a stale API - a field added last week reads as `undefined` while `bazel build` succeeds. `background` builds the imported targets once per session to keep them current (incremental, so a no-op on an up-to-date repository). `off` never builds; use `Bazel: Build Classpath` by hand."
+        },
+        "bazelJava.discoveryNoFetch": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Pass `--nofetch` to the discovery query so indexing never reaches the network. An unreachable container registry then fails the loading phase instantly instead of hanging, and the java targets still come back."
+        },
+        "bazelJava.commandTimeoutSeconds": {
+          "type": "number",
+          "default": 120,
+          "description": "Timeout for a single bazel query or aquery. Short on purpose: a hung query must not hang the IDE."
+        },
+        "bazelJava.backoffMaxSeconds": {
+          "type": "number",
+          "default": 300,
+          "description": "Upper bound of the exponential backoff applied after a failed import, so a broken or offline workspace is retried at a decreasing rate instead of continuously."
+        },
+        "bazelJava.outputBase": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Set to `ide` to give the IDE its own bazel server under `~/.cache/bazel-ide/<hash>`, or to an absolute path. This stops the IDE and the terminal from blocking each other on the bazel server lock and lets the IDE shut its own server down on exit. Costs a second analysis cache (1-2 GB). Empty means share the developer's server."
+        },
+        "bazelJava.maxIdleSeconds": {
+          "type": "number",
+          "default": 900,
+          "markdownDescription": "`--max_idle_secs` for the IDE-owned bazel server. Only applies when `#bazelJava.outputBase#` is set."
         }
       }
     }

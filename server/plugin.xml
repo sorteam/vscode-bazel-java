@@ -15,4 +15,15 @@
             id="ch.audienzz.bazel.jdtls.BAZEL_CONTAINER"
             class="ch.audienzz.bazel.jdtls.BazelClasspathContainerInitializer"/>
    </extension>
+   <extension
+         point="org.eclipse.jdt.ls.core.delegateCommandHandler">
+      <delegateCommandHandler class="ch.audienzz.bazel.jdtls.BazelCommandHandler">
+         <command id="bazel.refreshClasspath"/>
+         <command id="bazel.showImportReport"/>
+         <command id="bazel.buildClasspath"/>
+         <command id="bazel.importFile"/>
+         <command id="bazel.status"/>
+         <command id="bazel.buildFilesChanged"/>
+      </delegateCommandHandler>
+   </extension>
 </plugin>
