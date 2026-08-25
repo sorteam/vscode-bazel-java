@@ -1,0 +1,15 @@
+Manifest-Version: 1.0
+Bundle-ManifestVersion: 2
+Bundle-Name: Bazel Java Project Importer
+Bundle-SymbolicName: ch.audienzz.bazel.jdtls;singleton:=true
+Bundle-Version: 0.1.0
+Bundle-Vendor: Audienzz
+Bundle-ActivationPolicy: lazy
+Require-Bundle: org.eclipse.core.runtime,
+ org.eclipse.core.resources,
+ org.eclipse.core.jobs,
+ org.eclipse.equinox.common,
+ org.eclipse.jdt.core,
+ org.eclipse.jdt.launching,
+ org.eclipse.jdt.ls.core
+Require-Capability: osgi.ee;filter:="(&(osgi.ee=JavaSE)(version=17))"

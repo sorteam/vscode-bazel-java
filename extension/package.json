@@ -1,0 +1,36 @@
+{
+  "name": "bazel-java",
+  "displayName": "Bazel Java Project Importer",
+  "description": "Imports Bazel java targets into the Java Language Server using bazel aquery",
+  "version": "0.1.0",
+  "publisher": "audienzz",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "extensionDependencies": [
+    "redhat.java"
+  ],
+  "activationEvents": [
+    "onLanguage:java"
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "javaExtensions": [
+      "./server/ch.audienzz.bazel.jdtls.jar"
+    ],
+    "configuration": {
+      "title": "Bazel Java",
+      "properties": {
+        "bazelJava.binary": {
+          "type": "string",
+          "default": "",
+          "description": "Absolute path to the bazel or bazelisk binary. When empty, PATH is searched."
+        }
+      }
+    }
+  }
+}
