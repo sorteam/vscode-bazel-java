@@ -4,11 +4,24 @@ A VS Code extension plus a jdt.ls (redhat.java) bundle that imports bazel `java_
 `java_binary` / `java_test` targets into the Java Language Server. Source folders are linked, never
 copied; nothing is written into the working copy.
 
-- [PERFORMANCE_PLAN.md](PERFORMANCE_PLAN.md) - the measurements and the plan this implements
-- [INCIDENT-2026-08-25-hung-jvms.md](INCIDENT-2026-08-25-hung-jvms.md) - the failure that set the
-  priorities
+This file is for people working on the extension. The user-facing documentation - what it does, every
+setting, troubleshooting - is the marketplace listing, [extension/README.md](extension/README.md).
 
-## Build and install
+Published as `belfegor.vscode-bazel-java`.
+
+## Layout
+
+| Path | What it is |
+|---|---|
+| [extension/](extension/) | Everything that goes into the vsix: the JS half, the manifest, the marketplace page |
+| [extension/extension.js](extension/extension.js) | Settings mirror, commands, status bar, BUILD file watcher |
+| [server/src/](server/src/io/github/sorteam/bazel/jdtls/) | The OSGi bundle that runs inside jdt.ls |
+| [server/plugin.xml](server/plugin.xml) | Extension points: project importer, classpath container, command handler |
+| [server/test/](server/test/io/github/sorteam/bazel/jdtls/PluginTests.java) | Plain-main tests for the classes that avoid the Eclipse runtime |
+| [assets/](assets/) | Icon source and its renderer |
+| `out/`, `dist/`, `extension/server/`, `extension/LICENSE` | Generated, not in git |
+
+## Build, test, package
 
 ```bash
 ./build.sh     # javac + jar against the installed redhat.java bundles, staged into extension/server/
@@ -19,16 +32,19 @@ copied; nothing is written into the working copy.
 
 Then reload the VS Code window.
 
-The version lives in [extension/package.json](extension/package.json) alone;
-`Bundle-Version` is substituted into the manifest by `build.sh`. `JAVA_HOME` picks the JDK
-(17 or newer), `REDHAT_JAVA` pins which redhat.java the bundle compiles against - by default the
-newest one installed locally, which is exactly the thing to make explicit in CI.
+The build is javac and jar - no Maven, no Tycho, no target platform. The classpath comes from the
+jars inside an installed redhat.java, so there is a real dependency on which version that is:
+`REDHAT_JAVA` pins it, and by default the newest one found under `~/.vscode/extensions` wins. The
+bundle compiles against jdt.ls internals, so that choice decides which API it is built against -
+worth making explicit before this is built anywhere but a laptop.
 
-The marketplace listing is [extension/README.md](extension/README.md) - the file in this directory is
-for people working on the extension, not for its users. The icon is generated:
+`JAVA_HOME` picks the JDK (17 or newer). The version lives in
+[extension/package.json](extension/package.json) alone; `build.sh` substitutes it into
+`Bundle-Version`, so the manifest cannot drift. The icon is generated -
 `python3 assets/render-icon.py` after editing [assets/icon.svg](assets/icon.svg).
 
-Published as `belfegor.vscode-bazel-java`.
+Releasing: bump the version, add a [changelog](extension/CHANGELOG.md) entry, then
+`npx @vscode/vsce publish -p <token>` from `extension/`.
 
 ## How it works
 
@@ -39,7 +55,8 @@ Published as `belfegor.vscode-bazel-java`.
 | Provisioning | all Eclipse projects created in a single resource transaction, auto-build parked |
 | Classpath | one `bazel aquery --query_file` over every label at once, in a background job |
 
-Measured on a 898-package monorepo (442 java targets, 223 with sources):
+Measured on a 898-package monorepo (442 java targets, 223 with sources), bazel 9.2.0, redhat.java
+1.55.0:
 
 | | before | after |
 |---|---|---|
@@ -48,35 +65,23 @@ Measured on a 898-package monorepo (442 java targets, 223 with sources):
 | projects | 223 | 114 |
 | restart | full replay, ~40 s of bazel | served from the on-disk cache |
 
-## Configuration
+The two decisions behind those numbers: nothing on the indexing path blocks on bazel (containers are
+published from cache and filled in by
+[ClasspathResolveJob](server/src/io/github/sorteam/bazel/jdtls/ClasspathResolveJob.java)), and the
+whole import is persisted by
+[ClasspathStore](server/src/io/github/sorteam/bazel/jdtls/ClasspathStore.java) so a restart costs no
+bazel calls at all.
 
-All settings live under `bazelJava.*` in VS Code settings.
-
-| Setting | Default | What it does |
-|---|---|---|
-| `bazelJava.targets` | `[]` | Target patterns to import. Empty means the whole repository, or `.bazelproject`'s `directories:`. **The biggest single win on a large monorepo.** |
-| `bazelJava.excludeTargets` | `[]` | Patterns subtracted from the imported set |
-| `bazelJava.useBazelProject` | `true` | Take the scope from `.bazelproject` when `targets` is empty |
-| `bazelJava.importMode` | `lazy` | `lazy` also provisions a package on demand when a file outside the scope is opened; `eager` sticks to the scope |
-| `bazelJava.groupSourceRoots` | `true` | Merge `src/main` and `src/test` into one project |
-| `bazelJava.maxProjects` | `300` | Safety valve; above this the import is capped and warns |
-| `bazelJava.buildOnImport` | `background` | Build the imported targets once per session so the jars on the classpath are current, not whatever was last produced |
-| `bazelJava.discoveryNoFetch` | `true` | `--nofetch` on discovery, so indexing never reaches the network |
-| `bazelJava.commandTimeoutSeconds` | `120` | Per bazel query/aquery |
-| `bazelJava.backoffMaxSeconds` | `300` | Ceiling of the exponential backoff after a failed import |
-| `bazelJava.outputBase` | `""` | `ide` gives the IDE its own bazel server; empty shares the developer's |
-| `bazelJava.maxIdleSeconds` | `900` | `--max_idle_secs` for the IDE-owned server |
-| `bazelJava.binary` | `""` | Path to bazel/bazelisk; PATH is searched when empty |
-
-### How settings reach the server
+## How settings reach the server
 
 redhat.java forwards only the `java.*` namespace to jdt.ls, and the importer runs before any
 extension could push settings over `executeCommand`. Setting `process.env` from the extension does
 not work either, because redhat.java is an `extensionDependency` and has already launched the server
 by then - which is why `bazelJava.binary` used to do nothing.
 
-So the extension mirrors the settings to a file the server reads at import time, and the server
-merges several sources. Highest priority first:
+So the extension mirrors the settings to a file the server reads at import time, and
+[BazelSettings](server/src/io/github/sorteam/bazel/jdtls/BazelSettings.java) merges several sources.
+Highest priority first:
 
 1. `-Dbazel.<key>` system properties (via `java.jdt.ls.vmargs`)
 2. `BAZEL_JAVA_<KEY>` environment variables
@@ -84,91 +89,107 @@ merges several sources. Highest priority first:
 4. `<repo>/.vscode/bazel-java.json` - hand written, shareable with the team
 5. `<repo>/.bazelproject` `directories:` - import scope only
 
+`binary` and `outputBase` are read from 1-3 only. Both name something that gets executed - one goes
+straight to `ProcessBuilder`, the other becomes a `--output_base` startup option - so a repository
+must not be able to set them: cloning someone's repository and opening it would otherwise run
+whatever binary that repository named. They are machine-scoped in the manifest for the same reason.
+
 Nothing is written into the repository.
 
-## Commands
+Two consequences worth knowing. The hash in the file name is computed independently on both sides
+(`sha256(fsPath)` in JS, `sha256(getAbsolutePath())` in Java); if those strings ever differ the
+bridge silently goes unfound and the server runs on defaults. And because the language server starts
+first, settings changed before the very first import land only on the next reload.
 
-| Command | Effect |
-|---|---|
-| `Bazel: Refresh Classpath` | Drops every cache, clears the backoff window, reimports in the background |
-| `Bazel: Show Import Report` | Phase timings, project and jar counts, backoff state, current scope |
-| `Bazel: Build Classpath` | Runs `bazel build` over the imported targets so the jars on the classpath exist |
+## Invariants
 
-## Notes
-
-**Stale jars.** The counterpart to the missing-jar problem, and the nastier one. `aquery` reports
-what a build *would* consume; a jar produced before its inputs last changed is still sitting on disk
-and JDT indexes it happily. The symptom is a method or field that `bazel build` compiles fine but
-the IDE calls undefined - especially for code generated from a spec (openapi, protobuf), where the
-whole class comes from a `-gensrc.jar`. `bazelJava.buildOnImport` builds the imported targets once
-per session to keep them current; `Bazel: Build Classpath` does it on demand.
-
-**Index churn and OutOfMemoryError.** Republishing a classpath container makes JDT forget what it
-read from every jar behind it and index them again. On this repository that is ~1.6k jars and over a
-gigabyte written under `.metadata/.plugins/org.eclipse.jdt.core`. Doing it on every start is not
-merely slow: an editor closed mid-write leaves truncated index files behind, and JDT later reads a
-length field out of one of them as garbage - `Failed to read index data ... size 1885434739` - and
-dies with `OutOfMemoryError` no matter how large `-Xmx` is. So `buildOnImport` fingerprints the
-classpath jars by path, size and mtime around the build and republishes only when something actually
-moved; an up-to-date repository now costs one bazel no-op and no reindex at all. If a workspace has
-already been corrupted this way, `Java: Clean Java Language Server Workspace` is the repair - with
-this plugin the reimport that follows takes a couple of seconds.
-
-**Source roots.** Eclipse insists that a file's package match its directory below the source root;
-bazel has no such rule, because javac is handed an explicit list of files. That makes the source
-root worth deriving from what the files declare rather than from the shape of the path: a target
-whose sources sit under `src/main/java/com/github/...` has its root at `src/main/java`, not at the
-first path segment `src`. The winner has to cover at least half the files read, and a package that
-would put the root at the repository root is refused. Where roots nest - two targets in the same
-project, one under the other - the outer folder excludes the inner one, otherwise it claims the
-inner one's files under the wrong package and duplicates every type in it.
-
-Files whose package matches no directory at all are put where their own package says they belong:
-excluded from the real source folder by a resource filter and linked into a second one at the path
-the package implies. Nothing on disk moves. This matters more than the error it removes - a file
-placed in the wrong package also breaks every unqualified reference from it to its real neighbours,
-so one misplaced file costs a handful of errors in files that are themselves fine.
-
-A classpath exclusion alone is not enough, and is worse than nothing: the resource survives, the
-editor opens the file by its path on disk, and the language server answers "not on the classpath of
-project X, only syntax errors are reported". Hence the resource filter, which removes the resource
-outright.
-
-**Generated code.** A target's own output is never on its own compile classpath - bazel has no
-reason to put it there - but the IDE needs it, because that jar is the only place the annotation
-processors' output exists: the JPA static metamodel (`Entity_`), whole openapi-generated APIs, and
-anything else written during compilation. The Javac action's `--output` is therefore added to its
-own label's jars, ahead of everything it compiles against; types the project also has sources for
-still resolve from the source folder, which JDT reaches first. The matching `-gensrc.jar` is
-attached as that entry's source, so `Entity_` opens in the generated source rather than a decompiled
-class.
-
-**Lombok.** vscode-java enables lombok by finding a `lombok-<version>.jar` on the project classpath
-and loading that exact file with `-javaagent`. Bazel puts lombok on the *processor* path and only
-its interface jar (`header_lombok-*.jar`) on the classpath - right name, no bytecode. The container
-substitutes the full jar written next to it. Whether the agent then actually attaches is
-vscode-java's decision, not this plugin's; if lombok members still read as undefined, put
-`-javaagent:<path to redhat.java>/lombok/lombok-*.jar` in `java.jdt.ls.vmargs` directly.
-
-**Missing jars.** `aquery` reports the jars a Javac action *would* consume, not jars that exist.
-With `--nojava_header_compilation` those are full compile outputs, so on a fresh clone most of the
-classpath does not exist yet and is dropped. The count is logged and shown in the status bar; `Bazel:
-Build Classpath` materialises them.
-
-**Backoff.** A failed import is not retried immediately. The window doubles from 2 s up to
-`backoffMaxSeconds` and is shown in the status bar. It is cleared by any success, by a change to a
-`BUILD` / `*.bzl` / `MODULE.bazel` file, and by `Bazel: Refresh Classpath`.
-
-**Exit code 3.** `--keep_going` returns 3 when some package fails to load - a broken `BUILD`
-somewhere in the repository, or an unreachable registry. The java targets still come back, so exit 3
-is accepted and the loading errors are logged once and then counted.
+Things that look like dead weight and are not. Each one cost a debugging session.
 
 **`.classpath` is load-bearing.** jdt.ls checks every java project for a `.classpath` file on disk
 and, when it is missing, logs `project has no .classpath. Removing Java nature and builder` and does
 exactly that. So `setRawClasspath` is called in the form that writes the file, even though the
 classpath is also set in memory. Do not "optimise" that away.
 
-**A separate output base.** With `bazelJava.outputBase: "ide"` the IDE gets its own bazel server, so
-a `bazel build` in a terminal no longer blocks indexing and vice versa, and the server is shut down
-when the language server exits. It costs a second analysis cache (1-2 GB), so it is opt-in. Without
-it, no bazel server is ever shut down by this extension - the shared one belongs to the developer.
+**The java nature is applied after `open()`, not handed to `create()`.**
+`IProject.create(description, ...)` persists neither the natures nor the build spec, so a project
+directory left behind by a previous session comes back with an empty `<natures>` block, and
+`JavaProject.exists()` - which checks exactly that nature - then fails every `setRawClasspath` with
+"does not exist".
+
+**Provisioning is two transactions, not one.** A project created inside a batch is not visible to the
+java model until that batch ends and the delta has been broadcast, so configuring it in the same
+transaction fails. Creation is its own transaction; configuration runs in a second one.
+
+**Containers are republished only when a jar actually moved.** Republishing makes JDT forget what it
+read from every jar behind the container and index them again - on a large repository ~1.6k jars and
+over a gigabyte under `.metadata/.plugins/org.eclipse.jdt.core`. That is not merely slow: an editor
+closed mid-write leaves truncated index files behind, and JDT later reads a length field out of one
+of them as garbage (`Failed to read index data ... size 1885434739`) and dies with
+`OutOfMemoryError` regardless of `-Xmx`. So
+[BuildClasspathJob](server/src/io/github/sorteam/bazel/jdtls/BuildClasspathJob.java) fingerprints the
+jars by path, size and mtime around the build and republishes only on a change.
+
+**Exit code 3 is success.** `--keep_going` returns 3 when some package fails to load - a broken
+`BUILD` somewhere, or an unreachable registry. The java targets still come back, so 3 is accepted and
+the loading errors are logged once and then counted. Treating it as failure once turned a transient
+network outage into an overnight retry loop.
+
+**Backoff lives in `applies()`, not in the import.** jdt.ls asks the importer whether it applies and,
+if it says yes and then throws, asks again on the next trigger. Declining to apply is what keeps it
+out of `importToWorkspace()` entirely while the window is open.
+
+**Logging is deduplicated.** The same block of bazel errors written on every retry rotated the jdt.ls
+log every 42 minutes and destroyed the rest of the server's history. See
+[BazelLog](server/src/io/github/sorteam/bazel/jdtls/BazelLog.java).
+
+**Only a bazel server this plugin started is ever shut down.** The shared one belongs to the
+developer's terminal, and killing it would cancel their build. That is also why a dedicated
+`outputBase` is opt-in.
+
+## Design notes
+
+**Source roots are derived from what files declare, not from the path.** Eclipse insists that a
+file's package match its directory below the source root; bazel has no such rule, because javac is
+handed an explicit list of files. A target whose sources sit under `src/main/java/com/github/...` has
+its root at `src/main/java`, not at the first path segment `src`. The winner has to cover at least
+half the files read, and a package that would put the root at the repository root is refused. Where
+roots nest, the outer folder excludes the inner one, otherwise it claims the inner one's files under
+the wrong package and duplicates every type in it.
+
+Files whose package matches no directory at all are put where their own package says they belong:
+excluded from the real source folder by a resource filter and linked into a second one at the path
+the package implies. Nothing on disk moves. A classpath exclusion alone would be worse than nothing -
+the resource survives, the editor opens the file by its path on disk, and the language server answers
+"not on the classpath of project X, only syntax errors are reported". Hence the filter, which removes
+the resource outright. See
+[SourceRelocation](server/src/io/github/sorteam/bazel/jdtls/SourceRelocation.java).
+
+**A target's own output jar goes on its own classpath.** Bazel never puts it there - a target does
+not depend on itself - but that jar is the only place the annotation processors' output exists: the
+JPA static metamodel (`Entity_`), whole openapi-generated APIs, anything written during compilation.
+Types the project also has sources for still resolve from the source folder, which JDT reaches first.
+The matching `-gensrc.jar` is attached as that entry's source, so `Entity_` opens in generated source
+rather than a decompiled class.
+
+**Lombok gets the full jar, not the interface jar.** vscode-java enables lombok by finding a
+`lombok-<version>.jar` on the project classpath and loading that exact file with `-javaagent`. Bazel
+puts lombok on the *processor* path and only `header_lombok-*.jar` on the classpath - right name, no
+bytecode - so the container substitutes the full jar written next to it. Only lombok is treated this
+way; preferring full jars everywhere would grow the index for no benefit.
+
+**Missing jars are counted, not hidden.** `aquery` reports the jars a Javac action *would* consume,
+not jars that exist. Where a repository disables header compilation these are full compile outputs,
+so on a fresh clone most of the classpath has never been produced. Dropping them silently is what
+makes a fresh clone look like a project with no dependencies, so the count is logged and surfaced in
+the status bar, and `bazelJava.buildOnImport` materialises them.
+
+**Discovery is offline first.** IDE indexing has no business fetching image manifests from a
+container registry, so `--nofetch` is tried first and only falls back to a fetching run when it
+produces nothing.
+
+## Known gaps
+
+Kept honest, since they decide whether this works on a given repository: main/test grouping
+recognises only the `src/main` / `src/test` convention; the rule kinds are fixed at `java_library`,
+`java_binary` and `java_test`; a target whose `srcs` are generated by another rule is skipped; and
+Windows is untested.
