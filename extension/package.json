@@ -1,29 +1,60 @@
 {
-  "name": "bazel-java",
+  "name": "vscode-bazel-java",
   "displayName": "Bazel Java Project Importer",
   "description": "Imports Bazel java targets into the Java Language Server using bazel aquery",
-  "version": "0.2.0",
-  "publisher": "audienzz",
+  "version": "0.3.0",
+  "publisher": "belfegor",
   "license": "MIT",
+  "icon": "icon.png",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/sorteam/vscode-bazel-java.git"
+  },
+  "bugs": {
+    "url": "https://github.com/sorteam/vscode-bazel-java/issues"
+  },
+  "homepage": "https://github.com/sorteam/vscode-bazel-java#readme",
+  "keywords": [
+    "bazel",
+    "java",
+    "jdtls",
+    "monorepo",
+    "classpath"
+  ],
   "engines": {
     "vscode": "^1.80.0"
   },
   "categories": [
-    "Programming Languages"
+    "Programming Languages",
+    "Other"
   ],
   "extensionDependencies": [
     "redhat.java"
   ],
+  "extensionKind": [
+    "workspace"
+  ],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": false,
+      "description": "Importing a Bazel workspace runs bazel, which evaluates the repository's own BUILD and .bzl files as code."
+    },
+    "virtualWorkspaces": {
+      "supported": false,
+      "description": "Requires a real filesystem and a bazel binary that can be executed against it."
+    }
+  },
   "activationEvents": [
     "onLanguage:java",
     "workspaceContains:MODULE.bazel",
+    "workspaceContains:REPO.bazel",
     "workspaceContains:WORKSPACE.bazel",
     "workspaceContains:WORKSPACE"
   ],
   "main": "./extension.js",
   "contributes": {
     "javaExtensions": [
-      "./server/ch.audienzz.bazel.jdtls.jar"
+      "./server/io.github.sorteam.bazel.jdtls.jar"
     ],
     "commands": [
       {
@@ -48,7 +79,8 @@
         "bazelJava.binary": {
           "type": "string",
           "default": "",
-          "description": "Absolute path to the bazel or bazelisk binary. When empty, PATH is searched."
+          "scope": "machine",
+          "markdownDescription": "Absolute path to the bazel or bazelisk binary. When empty, PATH is searched. Machine-scoped on purpose: this path is executed, so a repository must not be able to set it."
         },
         "bazelJava.targets": {
           "type": "array",
@@ -107,7 +139,8 @@
         "bazelJava.outputBase": {
           "type": "string",
           "default": "",
-          "markdownDescription": "Set to `ide` to give the IDE its own bazel server under `~/.cache/bazel-ide/<hash>`, or to an absolute path. This stops the IDE and the terminal from blocking each other on the bazel server lock and lets the IDE shut its own server down on exit. Costs a second analysis cache (1-2 GB). Empty means share the developer's server."
+          "scope": "machine",
+          "markdownDescription": "Set to `ide` to give the IDE its own bazel server under `~/.cache/bazel-ide/<hash>`, or to an absolute path. This stops the IDE and the terminal from blocking each other on the bazel server lock and lets the IDE shut its own server down on exit. Costs a second analysis cache (1-2 GB). Empty means share the developer's server. Machine-scoped: it becomes a `--output_base` startup option."
         },
         "bazelJava.maxIdleSeconds": {
           "type": "number",

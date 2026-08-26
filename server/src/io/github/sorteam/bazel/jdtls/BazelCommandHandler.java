@@ -1,0 +1,145 @@
+package io.github.sorteam.bazel.jdtls;
+
+import java.io.File;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+
+import org.eclipse.core.runtime.IProgressMonitor;
+import org.eclipse.jdt.ls.core.internal.IDelegateCommandHandler;
+
+/*
+    Commands the VS Code side can invoke through java.execute.workspaceCommand.
+
+    Settings are read from disk rather than pushed from the client (see BazelSettings), but anything
+    that happens after startup - refreshing, reporting, building the jars a classpath points at,
+    pulling in a file that falls outside the imported scope - arrives here.
+ */
+public class BazelCommandHandler implements IDelegateCommandHandler {
+
+    public static final String REFRESH = "bazel.refreshClasspath";
+    public static final String REPORT = "bazel.showImportReport";
+    public static final String BUILD_CLASSPATH = "bazel.buildClasspath";
+    public static final String IMPORT_FILE = "bazel.importFile";
+    public static final String STATUS = "bazel.status";
+    public static final String BUILD_FILES_CHANGED = "bazel.buildFilesChanged";
+
+    @Override
+    public Object executeCommand(String commandId, List<Object> arguments,
+            IProgressMonitor monitor) throws Exception {
+        switch (commandId) {
+            case REFRESH:
+                return refresh();
+            case REPORT:
+                return report();
+            case BUILD_CLASSPATH:
+                return BuildClasspathJob.start(sessions());
+            case IMPORT_FILE:
+                return LazyImport.forFile(stringArgument(arguments, 0), monitor);
+            case STATUS:
+                return status();
+            case BUILD_FILES_CHANGED:
+                return buildFilesChanged();
+            default:
+                throw new UnsupportedOperationException("Unknown command " + commandId);
+        }
+    }
+
+    private static Object refresh() {
+        int refreshed = 0;
+        for (BazelSession session : sessions()) {
+            session.refresh(true);
+            DiscoveryRefreshJob.scheduleFor(session);
+            refreshed++;
+        }
+        return refreshed == 0
+                ? "No bazel workspace is imported."
+                : "Refreshing " + refreshed + " bazel workspace(s); the classpath will update"
+                        + " in the background.";
+    }
+
+    /*
+        Sent by the extension when a BUILD, .bzl or MODULE.bazel file changed. It also lifts the
+        backoff window: the edit is very often the fix for whatever the import was failing on, and
+        making a developer wait out five minutes after fixing their own BUILD file would be absurd.
+     */
+    private static Object buildFilesChanged() {
+        int affected = 0;
+        for (BazelSession session : sessions()) {
+            session.getDiscoveryGate().reset();
+            session.getClasspathGate().reset();
+            DiscoveryRefreshJob.scheduleFor(session, true);
+            affected++;
+        }
+        return affected;
+    }
+
+    private static Object report() {
+        if (sessions().isEmpty()) {
+            return "No bazel workspace is imported.";
+        }
+        StringBuilder out = new StringBuilder();
+        for (BazelSession session : sessions()) {
+            out.append("Workspace ").append(session.getWorkspace().getRoot()).append('\n');
+            out.append(session.getReport().render());
+            out.append("  scope              : ").append(session.getSettings().universe())
+                    .append('\n');
+            out.append("  cached classpaths  : ")
+                    .append(session.getStore().cachedLabelCount()).append('\n');
+            out.append("  discovery gate     : ")
+                    .append(session.getDiscoveryGate().describe()).append('\n');
+            out.append("  classpath gate     : ")
+                    .append(session.getClasspathGate().describe()).append('\n');
+            out.append("  output base        : ")
+                    .append(session.getSettings().hasDedicatedOutputBase()
+                            ? session.getWorkspace()
+                                    .outputBaseDirectory(session.getSettings()).toString()
+                            : "shared with the terminal")
+                    .append('\n');
+        }
+        return out.toString();
+    }
+
+    private static Object status() {
+        Map<String, Object> status = new LinkedHashMap<>();
+        for (BazelSession session : sessions()) {
+            Map<String, Object> entry = new LinkedHashMap<>();
+            entry.put("scope", session.getSettings().universe());
+            entry.put("discovery", session.getDiscoveryGate().describe());
+            entry.put("classpath", session.getClasspathGate().describe());
+            entry.put("backoffSeconds", Math.max(
+                    session.getDiscoveryGate().remainingSeconds(),
+                    session.getClasspathGate().remainingSeconds()));
+            entry.put("missingJars", session.getReport().getMissingJars());
+            status.put(session.getWorkspace().getRoot().getAbsolutePath(), entry);
+        }
+        return status;
+    }
+
+    static Set<BazelSession> sessions() {
+        return new LinkedHashSet<>(BazelSession.all());
+    }
+
+    static BazelSession sessionFor(File file) {
+        BazelSession best = null;
+        int bestLength = -1;
+        for (BazelSession session : BazelSession.all()) {
+            String root = session.getWorkspace().getRoot().getAbsolutePath();
+            if (file.getAbsolutePath().startsWith(root + File.separator)
+                    && root.length() > bestLength) {
+                best = session;
+                bestLength = root.length();
+            }
+        }
+        return best;
+    }
+
+    private static String stringArgument(List<Object> arguments, int index) {
+        if (arguments == null || arguments.size() <= index || arguments.get(index) == null) {
+            return "";
+        }
+        return String.valueOf(arguments.get(index));
+    }
+}

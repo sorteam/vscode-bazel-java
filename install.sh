@@ -1,24 +1,30 @@
 #!/bin/bash
-# Builds the bundle and installs the extension into ~/.vscode/extensions.
+# Builds a vsix and installs it, so the local install goes through exactly the artifact that gets
+# published. Hand-copying into ~/.vscode/extensions is what used to leave two copies of the bundle
+# registered with jdt.ls at once.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
-BUNDLE_ID="ch.audienzz.bazel.jdtls"
-TARGET="$HOME/.vscode/extensions/audienzz.bazel-java-0.2.0"
 
-"$HERE/build.sh"
+CODE="${CODE:-$(command -v code || true)}"
+if [ -z "$CODE" ]; then
+  for candidate in \
+    "/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code" \
+    "$HOME/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code"; do
+    [ -x "$candidate" ] && CODE="$candidate" && break
+  done
+fi
 
-echo "==> installing into $TARGET"
-# Older versions live in their own directory; leaving one behind registers the extension twice and
-# loads two copies of the bundle into jdt.ls.
-for stale in "$HOME"/.vscode/extensions/audienzz.bazel-java-*; do
-  [ "$stale" = "$TARGET" ] || rm -rf "$stale"
-done
-rm -rf "$TARGET"
-mkdir -p "$TARGET/server"
-cp "$HERE/extension/package.json" "$TARGET/package.json"
-cp "$HERE/extension/extension.js" "$TARGET/extension.js"
-cp "$HERE/out/$BUNDLE_ID.jar" "$TARGET/server/$BUNDLE_ID.jar"
+"$HERE/package.sh"
+VSIX="$(ls -t "$HERE"/dist/*.vsix | head -1)"
 
-echo "==> installed:"
-find "$TARGET" -type f | sed "s|$TARGET|  .|"
+if [ -z "$CODE" ]; then
+  echo
+  echo "The 'code' CLI is not on PATH (VS Code: Shell Command: Install 'code' command in PATH)."
+  echo "Install by hand: Extensions view -> ... -> Install from VSIX -> $VSIX"
+  exit 0
+fi
+
+echo "==> installing $VSIX"
+"$CODE" --install-extension "$VSIX" --force
+echo "==> reload the VS Code window"

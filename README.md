@@ -11,12 +11,24 @@ copied; nothing is written into the working copy.
 ## Build and install
 
 ```bash
-./build.sh     # javac + jar against the installed redhat.java bundles
+./build.sh     # javac + jar against the installed redhat.java bundles, staged into extension/server/
 ./test.sh      # plain-main test suite (parser, grouping, settings, query)
-./install.sh   # build and install into ~/.vscode/extensions
+./package.sh   # build + vsce package -> dist/vscode-bazel-java-<version>.vsix
+./install.sh   # package, then install the vsix through the code CLI
 ```
 
 Then reload the VS Code window.
+
+The version lives in [extension/package.json](extension/package.json) alone;
+`Bundle-Version` is substituted into the manifest by `build.sh`. `JAVA_HOME` picks the JDK
+(17 or newer), `REDHAT_JAVA` pins which redhat.java the bundle compiles against - by default the
+newest one installed locally, which is exactly the thing to make explicit in CI.
+
+The marketplace listing is [extension/README.md](extension/README.md) - the file in this directory is
+for people working on the extension, not for its users. The icon is generated:
+`python3 assets/render-icon.py` after editing [assets/icon.svg](assets/icon.svg).
+
+Published as `belfegor.vscode-bazel-java`.
 
 ## How it works
 

@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <rect width="256" height="256" rx="48" fill="#1b2430"/>
+  <!-- isometric cube: a built artifact -->
+  <g>
+    <polygon points="128,44 214,92 128,140 42,92" fill="#7cc36b"/>
+    <polygon points="42,92 128,140 128,212 42,164" fill="#3f8f4a"/>
+    <polygon points="214,92 128,140 128,212 214,164" fill="#2c6b39"/>
+  </g>
+  <!-- java-orange seam, hinting the two halves the importer merges -->
+  <polygon points="128,140 214,92 214,104 128,152" fill="#e88a34" opacity="0.95"/>
+  <polygon points="42,92 128,140 128,152 42,104" fill="#f0a75c" opacity="0.95"/>
+</svg>
