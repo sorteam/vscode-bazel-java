@@ -55,15 +55,24 @@ Releasing: bump the version, add a [changelog](extension/CHANGELOG.md) entry, th
 | Provisioning | all Eclipse projects created in a single resource transaction, auto-build parked |
 | Classpath | one `bazel aquery --query_file` over every label at once, in a background job |
 
-Measured on a 898-package monorepo (442 java targets, 223 with sources), bazel 9.2.0, redhat.java
-1.55.0:
+Measured by a headless jdt.ls run - the same `initializationOptions.bundles` redhat.java uses - on a
+898-package monorepo (442 java targets, 223 with sources), bazel 9.2.0, redhat.java 1.55.0, bazel
+server warm:
 
-| | before | after |
+| Phase | Cold jdt.ls | Restart |
 |---|---|---|
-| discovery | 2.2 s | 1.2 s |
-| classpath | 223 sequential aqueries, ~69 s, blocking | 1 batched aquery, 3.0 s, in the background |
-| projects | 223 | 114 |
-| restart | full replay, ~40 s of bazel | served from the on-disk cache |
+| discovery (`bazel query`) | 1012 ms | 18 ms, from cache, bazel not called |
+| container initialization | 0 bazel calls | 0 bazel calls |
+| provisioning | 942 ms, 114 projects | 1020 ms |
+| classpath resolution | 2 batched aqueries, ~3.2 s, in the background | 0 bazel calls |
+| **`Workspace initialized`** | **2105 ms** | **1255 ms** |
+| cache validity check | - | 341 ms, walking the BUILD files |
+
+The batch is what makes classpath resolution cheap: one `aquery --query_file set(223)` is 3.0 s,
+where a per-target `aquery mnemonic("Javac", <label>)` costs ~310 ms and 223 of them are ~69 s.
+Naming the labels explicitly rather than querying `//...` matters for more than the 4x - `//...`
+pulls every js, oci and helm target into analysis, so one unreachable external repository breaks a
+query that has no business touching it.
 
 The two decisions behind those numbers: nothing on the indexing path blocks on bazel (containers are
 published from cache and filled in by
