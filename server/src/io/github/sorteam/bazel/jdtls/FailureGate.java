@@ -19,11 +19,19 @@ public final class FailureGate {
     private static final long BASE_DELAY_SECONDS = 2;
     private static final int MAX_EXPONENT = 8;
 
+    /*
+        A busy bazel server is not a failure, so it gets a short fixed window instead of the
+        exponential one: the terminal build that holds the lock will finish on its own, and the
+        consecutive-failure counter must not grow while it does.
+     */
+    private static final long BUSY_RETRY_SECONDS = 15;
+
     private final String name;
     private final int maxDelaySeconds;
 
     private int consecutiveFailures;
     private long retryNotBefore;
+    private boolean busyWaiting;
     private String lastFailure = "";
 
     public FailureGate(String name, int maxDelaySeconds) {
@@ -52,6 +60,7 @@ public final class FailureGate {
 
     public synchronized void recordFailure(String reason) {
         consecutiveFailures++;
+        busyWaiting = false;
         lastFailure = reason == null ? "" : reason;
         long delay = Math.min(maxDelaySeconds,
                 BASE_DELAY_SECONDS << Math.min(consecutiveFailures - 1, MAX_EXPONENT));
@@ -62,6 +71,25 @@ public final class FailureGate {
                 name, lastFailure, delay));
     }
 
+    /*
+        The bazel server is occupied by someone else's command - a terminal build, typically. Opens
+        a short fixed window without touching the failure counter: the situation resolves itself and
+        must not escalate towards the five-minute backoff ceiling.
+     */
+    public synchronized void recordBusy(String reason) {
+        busyWaiting = true;
+        lastFailure = reason == null ? "" : reason;
+        retryNotBefore = System.nanoTime() + TimeUnit.SECONDS.toNanos(BUSY_RETRY_SECONDS);
+        BazelLog.warnOnce("gate-busy:" + name, String.format(
+                "Bazel: %s is waiting for the bazel server (busy with another command, likely a"
+                        + " terminal build); retrying every %d s until it frees up",
+                name, BUSY_RETRY_SECONDS));
+    }
+
+    public synchronized boolean isBusyWaiting() {
+        return busyWaiting && shouldSkip();
+    }
+
     public synchronized void recordSuccess() {
         if (consecutiveFailures > 0) {
             BazelLog.info(String.format("Bazel: %s recovered after %d failed attempt(s)",
@@ -69,8 +97,10 @@ public final class FailureGate {
         }
         consecutiveFailures = 0;
         retryNotBefore = 0;
+        busyWaiting = false;
         lastFailure = "";
         BazelLog.clear("gate:" + name);
+        BazelLog.clear("gate-busy:" + name);
     }
 
     /*
@@ -80,10 +110,15 @@ public final class FailureGate {
      */
     public synchronized void reset() {
         retryNotBefore = 0;
+        busyWaiting = false;
         BazelLog.clear("gate:" + name);
+        BazelLog.clear("gate-busy:" + name);
     }
 
     public synchronized String describe() {
+        if (isBusyWaiting()) {
+            return String.format("bazel server busy, retry in %d s", remainingSeconds());
+        }
         if (consecutiveFailures == 0) {
             return "ok";
         }

@@ -71,7 +71,13 @@ public class BazelProjectImporter extends AbstractProjectImporter {
             targets = discover(progress.split(20));
             session.getDiscoveryGate().recordSuccess();
         } catch (CoreException e) {
-            session.getDiscoveryGate().recordFailure(e.getMessage());
+            if (BazelWorkspace.isServerBusy(e)) {
+                // A terminal command holds the server; a short fixed window in applies() is enough,
+                // escalating the exponential backoff for it would punish a normal situation.
+                session.getDiscoveryGate().recordBusy(e.getMessage());
+            } else {
+                session.getDiscoveryGate().recordFailure(e.getMessage());
+            }
             throw e;
         }
         long discoveryMillis = System.currentTimeMillis() - discoveryStarted;

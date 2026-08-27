@@ -56,7 +56,12 @@ public class BazelClasspathContainerInitializer extends ClasspathContainerInitia
                 new IClasspathContainer[] { container }, new NullProgressMonitor());
         session.getReport().countJars(container.getResolvedCount(), container.getMissingCount());
 
-        if (!complete || executionRoot == null) {
+        if (complete && executionRoot != null) {
+            // Seed the republish guard with what was just handed to JDT, so the next refresh can
+            // tell "identical classpath, keep the container and the index" from a real change.
+            session.setPublishedContainerStamp(javaProject.getProject().getName(),
+                    ContainerStamp.of(executionRoot, mainJars, testJars));
+        } else {
             ClasspathResolveJob.enqueue(session, javaProject,
                     labels.mainLabels(), labels.testLabels(), false);
         }

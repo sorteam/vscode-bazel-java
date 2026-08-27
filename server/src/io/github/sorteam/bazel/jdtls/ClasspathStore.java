@@ -166,14 +166,39 @@ public final class ClasspathStore {
         if (!settingsFingerprint.equals(settings.fingerprint())) {
             return true;
         }
-        String current = Digests.buildFilesDigest(root.toPath());
-        return current.isEmpty() || !current.equals(buildFilesDigest);
+        return isStale(settings, Digests.buildFilesDigest(root.toPath()));
+    }
+
+    /*
+        Variant for callers that already walked the build files. The digest a refresh stamps must be
+        the one taken BEFORE its discovery ran - stamping a digest computed afterwards marks data
+        from the old tree as current when the tree moved mid-refresh (a second branch switch).
+     */
+    public synchronized boolean isStale(BazelSettings settings, String currentDigest) {
+        load();
+        if (jarsByLabel.isEmpty() || discovery.isEmpty()) {
+            return true;
+        }
+        if (!settingsFingerprint.equals(settings.fingerprint())) {
+            return true;
+        }
+        return currentDigest.isEmpty() || !currentDigest.equals(buildFilesDigest);
+    }
+
+    /* False until the first completed import stamps the cache (and again after invalidate()). */
+    public synchronized boolean hasStamp() {
+        load();
+        return !buildFilesDigest.isEmpty();
     }
 
     public synchronized void stamp(BazelSettings settings) {
+        stamp(settings, Digests.buildFilesDigest(root.toPath()));
+    }
+
+    public synchronized void stamp(BazelSettings settings, String digest) {
         load();
         settingsFingerprint = settings.fingerprint();
-        buildFilesDigest = Digests.buildFilesDigest(root.toPath());
+        buildFilesDigest = digest;
         dirty = true;
     }
 

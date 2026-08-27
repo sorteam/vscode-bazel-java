@@ -15,6 +15,7 @@ const SETTINGS_KEYS = [
   "maxIdleSeconds",
   "commandTimeoutSeconds",
   "discoveryNoFetch",
+  "noblockForLock",
   "backoffMaxSeconds",
   "groupSourceRoots",
   "buildOnImport",
@@ -113,7 +114,16 @@ function activate(context) {
       const entries = Object.values(state || {});
       const backoff = entries.reduce((max, entry) => Math.max(max, entry.backoffSeconds || 0), 0);
       const missing = entries.reduce((sum, entry) => sum + (entry.missingJars || 0), 0);
-      if (backoff > 0) {
+      const busy = entries.some((entry) => entry.serverBusy);
+      if (busy) {
+        // Not an error: a terminal build holds the bazel server lock and the IDE is waiting it out.
+        status.text = "$(watch) Bazel: waiting for another bazel command";
+        status.tooltip =
+          "A bazel command outside the IDE (usually a terminal build) holds the server lock. " +
+          'The classpath refreshes when it finishes. Setting bazelJava.outputBase to "ide" ' +
+          "gives the IDE its own server so the two never queue behind each other.";
+        status.show();
+      } else if (backoff > 0) {
         status.text = `$(warning) Bazel: retry in ${backoff}s`;
         status.tooltip = entries.map((entry) => entry.discovery).join("\n");
         status.show();

@@ -56,6 +56,7 @@ public final class BazelSettings {
     private int maxIdleSeconds = 900;
     private int commandTimeoutSeconds = 120;
     private boolean discoveryNoFetch = true;
+    private boolean noblockForLock = true;
     private int backoffMaxSeconds = 300;
     private boolean groupSourceRoots = true;
     private String buildOnImport = BUILD_ON_IMPORT_BACKGROUND;
@@ -124,6 +125,15 @@ public final class BazelSettings {
 
     public boolean isDiscoveryNoFetch() {
         return discoveryNoFetch;
+    }
+
+    /*
+        Fail fast (exit 9) when another bazel command holds the server lock instead of queueing
+        behind it. On a shared output base "another command" is the developer's own terminal build,
+        which right after a branch switch runs for minutes - exactly when the refresh fires.
+     */
+    public boolean isNoblockForLock() {
+        return noblockForLock;
     }
 
     public int getBackoffMaxSeconds() {
@@ -227,6 +237,7 @@ public final class BazelSettings {
         maxIdleSeconds = integer(json, "maxIdleSeconds", maxIdleSeconds);
         commandTimeoutSeconds = integer(json, "commandTimeoutSeconds", commandTimeoutSeconds);
         discoveryNoFetch = bool(json, "discoveryNoFetch", discoveryNoFetch);
+        noblockForLock = bool(json, "noblockForLock", noblockForLock);
         backoffMaxSeconds = integer(json, "backoffMaxSeconds", backoffMaxSeconds);
         groupSourceRoots = bool(json, "groupSourceRoots", groupSourceRoots);
         buildOnImport = string(json, "buildOnImport", buildOnImport);
@@ -307,6 +318,7 @@ public final class BazelSettings {
                 commandTimeoutSeconds);
         backoffMaxSeconds = integer(override("backoffMaxSeconds", null), backoffMaxSeconds);
         discoveryNoFetch = bool(override("discoveryNoFetch", null), discoveryNoFetch);
+        noblockForLock = bool(override("noblockForLock", null), noblockForLock);
         groupSourceRoots = bool(override("groupSourceRoots", null), groupSourceRoots);
         buildOnImport = override("buildOnImport", buildOnImport);
 

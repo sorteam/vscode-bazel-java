@@ -11,7 +11,11 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Consumer;
 
@@ -33,10 +37,35 @@ public class BazelWorkspace {
 
     private static final int MAX_CAPTURED_ERRORS = 20;
 
+    /*
+        The client exits with 9 when --noblock_for_lock is set and another command holds the lock
+        (verified on bazel 9.2.0). The same value doubles as the IStatus code that marks a
+        CoreException as "the server is busy", which callers retry on a short fixed interval
+        instead of escalating the exponential backoff - a terminal build is not a failure.
+     */
+    private static final int SERVER_BUSY_EXIT_CODE = 9;
+    public static final int STATUS_SERVER_BUSY = 9;
+    private static final String BUSY_STDERR_MARKER = "Another command (pid=";
+
+    private static final long BUSY_WINDOW_NANOS = TimeUnit.SECONDS.toNanos(30);
+
+    /*
+        One shared watchdog thread for every bazel process this JVM starts. The commandLock keeps
+        the processes themselves serialised per workspace, so the watchdog is never watching more
+        than a handful at a time.
+     */
+    private static final ScheduledExecutorService WATCHDOG =
+            Executors.newSingleThreadScheduledExecutor(runnable -> {
+                Thread thread = new Thread(runnable, "bazel-watchdog");
+                thread.setDaemon(true);
+                return thread;
+            });
+
     private final File root;
     private final ReentrantLock commandLock = new ReentrantLock(true);
 
     private volatile BazelSettings settings;
+    private volatile long lastBusyNanos;
     private File executionRoot;
     private boolean serverStarted;
 
@@ -158,35 +187,90 @@ public class BazelWorkspace {
         serverStarted = true;
 
         List<String> capturedErrors = Collections.synchronizedList(new ArrayList<>());
-        Thread stderrPump = drainStderr(process, capturedErrors);
-        try (BufferedReader reader = new BufferedReader(
-                new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8))) {
-            String line;
-            while ((line = reader.readLine()) != null) {
-                if (monitor != null && monitor.isCanceled()) {
+        AtomicReference<String> busyLine = new AtomicReference<>();
+        Thread stderrPump = drainStderr(process, capturedErrors, busyLine);
+
+        /*
+            The timeout used to be enforced only in waitFor(), after stdout hit EOF - and a bazel
+            client waiting for the server lock writes nothing to stdout, so "timed out" never fired
+            in exactly the case it was written for: a terminal build holding the lock while a jdt.ls
+            job thread sat in readLine(). The watchdog covers the whole lifetime of the process, and
+            doubles as the only cancellation check that works while the process is silent.
+         */
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(timeoutSeconds);
+        AtomicReference<String> killReason = new AtomicReference<>();
+        ScheduledFuture<?> watchdog = WATCHDOG.scheduleWithFixedDelay(() -> {
+            if (!process.isAlive()) {
+                return;
+            }
+            if (monitor != null && monitor.isCanceled()) {
+                if (killReason.compareAndSet(null, "was cancelled")) {
                     process.destroyForcibly();
-                    throw new CoreException(error("Cancelled: " + summarise(command), null));
                 }
-                if (!line.isBlank()) {
-                    sink.accept(line);
+            } else if (System.nanoTime() - deadline >= 0) {
+                if (killReason.compareAndSet(null, "timed out after " + timeoutSeconds + " s")) {
+                    process.destroyForcibly();
                 }
             }
-        } catch (IOException e) {
-            throw new CoreException(error("Failed reading output of " + command.get(0), e));
-        }
+        }, 500, 500, TimeUnit.MILLISECONDS);
 
         int exitCode;
         try {
-            if (!process.waitFor(timeoutSeconds, TimeUnit.SECONDS)) {
-                process.destroyForcibly();
-                throw new CoreException(error(
-                        "Timed out after " + timeoutSeconds + " s: " + summarise(command), null));
+            try (BufferedReader reader = new BufferedReader(
+                    new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8))) {
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    if (monitor != null && monitor.isCanceled()) {
+                        process.destroyForcibly();
+                        throw new CoreException(error("Cancelled: " + summarise(command), null));
+                    }
+                    if (!line.isBlank()) {
+                        sink.accept(line);
+                    }
+                }
+            } catch (IOException e) {
+                // A process killed by the watchdog closes its streams mid-read; the kill reason is
+                // the real story then, reported below.
+                if (killReason.get() == null) {
+                    throw new CoreException(error("Failed reading output of " + command.get(0), e));
+                }
             }
-            exitCode = process.exitValue();
-            stderrPump.join(TimeUnit.SECONDS.toMillis(5));
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new CoreException(error("Interrupted: " + summarise(command), e));
+
+            try {
+                if (!process.waitFor(timeoutSeconds, TimeUnit.SECONDS)) {
+                    process.destroyForcibly();
+                    throw new CoreException(error(
+                            "Timed out after " + timeoutSeconds + " s: " + summarise(command), null));
+                }
+                exitCode = process.exitValue();
+                stderrPump.join(TimeUnit.SECONDS.toMillis(5));
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new CoreException(error("Interrupted: " + summarise(command), e));
+            }
+        } finally {
+            watchdog.cancel(false);
+        }
+
+        /*
+            Busy beats every other classification: with --noblock_for_lock the client exits with 9
+            immediately, and without it the watchdog kill of a client stuck behind the lock must not
+            read as a generic failure. Either way the caller sees STATUS_SERVER_BUSY and retries on a
+            short fixed interval instead of escalating the exponential backoff.
+         */
+        if (!ACCEPTED_EXIT_CODES.contains(exitCode)
+                && (exitCode == SERVER_BUSY_EXIT_CODE || busyLine.get() != null)) {
+            lastBusyNanos = System.nanoTime();
+            String detail = busyLine.get() == null ? "exit code " + exitCode : busyLine.get();
+            BazelLog.warnOnce("bazel-busy:" + root.getName(), String.format(
+                    "Bazel: the bazel server for %s is busy with another command (a terminal"
+                            + " build?): %s", root.getName(), detail));
+            throw new CoreException(busyError(
+                    summarise(command) + " - the bazel server is busy: " + detail));
+        }
+        String killed = killReason.get();
+        if (killed != null) {
+            throw new CoreException(error(summarise(command) + " " + killed, null));
         }
 
         if (exitCode == 3) {
@@ -196,12 +280,34 @@ public class BazelWorkspace {
                     "Bazel: %s completed with loading-phase errors (exit 3), using partial results."
                             + " First error: %s",
                     summarise(command), firstError(capturedErrors)));
+            lastBusyNanos = 0;
             return;
         }
         if (!ACCEPTED_EXIT_CODES.contains(exitCode)) {
             throw new CoreException(error(summarise(command) + " failed with exit code " + exitCode
                     + (capturedErrors.isEmpty() ? "" : ": " + firstError(capturedErrors)), null));
         }
+        lastBusyNanos = 0;
+        BazelLog.clear("bazel-busy:" + root.getName());
+    }
+
+    /*
+        True when the last completed command found the server occupied by someone else's command and
+        nothing has succeeded since. Consulted by jobs that are free to wait - the background
+        classpath build, mostly - before they join the queue.
+     */
+    public boolean wasBusyRecently() {
+        long busyAt = lastBusyNanos;
+        return busyAt != 0 && System.nanoTime() - busyAt < BUSY_WINDOW_NANOS;
+    }
+
+    public static boolean isServerBusy(CoreException e) {
+        return e.getStatus() != null && e.getStatus().getCode() == STATUS_SERVER_BUSY;
+    }
+
+    private static IStatus busyError(String message) {
+        return new Status(IStatus.ERROR, BazelClasspathContainerInitializer.PLUGIN_ID,
+                STATUS_SERVER_BUSY, message, null);
     }
 
     private List<String> buildCommand(BazelSettings current, String[] args) {
@@ -209,6 +315,16 @@ public class BazelWorkspace {
         command.add(BazelBinary.resolve(current));
 
         // Startup options have to precede the command name.
+        if (current.isNoblockForLock()) {
+            /*
+                Fail with exit 9 instead of queueing behind whoever holds the server lock - on a
+                shared output base that is the developer's own terminal build, which can run for
+                many minutes right after the branch switch that triggered this refresh. Verified on
+                bazel 9.2.0: startup-option position, exit code 9, and it does not restart a running
+                server that was started without it.
+             */
+            command.add("--noblock_for_lock");
+        }
         if (current.hasDedicatedOutputBase()) {
             command.add("--output_base=" + outputBaseDirectory(current));
             command.add("--max_idle_secs=" + current.getMaxIdleSeconds());
@@ -267,12 +383,19 @@ public class BazelWorkspace {
         }
     }
 
-    private Thread drainStderr(Process process, List<String> captured) {
+    private Thread drainStderr(Process process, List<String> captured,
+            AtomicReference<String> busyLine) {
         Thread thread = new Thread(() -> {
             try (BufferedReader reader = new BufferedReader(
                     new InputStreamReader(process.getErrorStream(), StandardCharsets.UTF_8))) {
                 String line;
                 while ((line = reader.readLine()) != null) {
+                    if (line.contains(BUSY_STDERR_MARKER)) {
+                        // "Another command (pid=N) is running." - printed by the client both when
+                        // it exits immediately (--noblock_for_lock) and when it queues. Not an
+                        // ERROR line, so it used to vanish silently while the IDE looked hung.
+                        busyLine.compareAndSet(null, line.strip());
+                    }
                     if (line.startsWith("ERROR") || line.startsWith("FATAL")) {
                         if (captured.size() < MAX_CAPTURED_ERRORS) {
                             captured.add(line);

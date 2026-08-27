@@ -68,6 +68,11 @@ public final class LazyImport {
             session.getStore().save();
             return "Imported " + projects.size() + " project(s) for //" + packagePath;
         } catch (CoreException e) {
+            if (BazelWorkspace.isServerBusy(e)) {
+                session.getDiscoveryGate().recordBusy(e.getMessage());
+                return "The bazel server is busy with another command; open the file again in a"
+                        + " moment.";
+            }
             session.getDiscoveryGate().recordFailure(e.getMessage());
             return "Failed to import //" + packagePath + ": " + e.getMessage();
         }

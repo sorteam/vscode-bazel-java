@@ -129,14 +129,47 @@ directory left behind by a previous session comes back with an empty `<natures>`
 java model until that batch ends and the delta has been broadcast, so configuring it in the same
 transaction fails. Creation is its own transaction; configuration runs in a second one.
 
-**Containers are republished only when a jar actually moved.** Republishing makes JDT forget what it
-read from every jar behind the container and index them again - on a large repository ~1.6k jars and
-over a gigabyte under `.metadata/.plugins/org.eclipse.jdt.core`. That is not merely slow: an editor
-closed mid-write leaves truncated index files behind, and JDT later reads a length field out of one
-of them as garbage (`Failed to read index data ... size 1885434739`) and dies with
-`OutOfMemoryError` regardless of `-Xmx`. So
-[BuildClasspathJob](server/src/io/github/sorteam/bazel/jdtls/BuildClasspathJob.java) fingerprints the
-jars by path, size and mtime around the build and republishes only on a change.
+**Containers are republished only when their content actually changed.** Republishing makes JDT
+forget what it read from every jar behind the container and index them again - on a large repository
+~1.6k jars and over a gigabyte under `.metadata/.plugins/org.eclipse.jdt.core`. That is not merely
+slow: an editor closed mid-write leaves truncated index files behind, and JDT later reads a length
+field out of one of them as garbage (`Failed to read index data ... size 1885434739`) and dies with
+`OutOfMemoryError` regardless of `-Xmx`. The guard sits at the publish site:
+[ClasspathResolveJob](server/src/io/github/sorteam/bazel/jdtls/ClasspathResolveJob.java) compares a
+[ContainerStamp](server/src/io/github/sorteam/bazel/jdtls/ContainerStamp.java) - jar list, order,
+size, mtime - against what was last handed to JDT (seeded by the container initializer from the disk
+cache) and skips `setClasspathContainer` on a match. This is what keeps a branch switch, which
+re-resolves every project, from re-indexing the whole repository.
+[BuildClasspathJob](server/src/io/github/sorteam/bazel/jdtls/BuildClasspathJob.java) additionally
+fingerprints the jars around its build so an up-to-date build does not even trigger a refresh.
+
+**The command timeout covers a silent process.** `waitFor(timeout)` only runs after stdout hits EOF,
+and a bazel client waiting for the server lock writes nothing to stdout - so the timeout used to
+never fire in exactly the case it existed for, and a terminal build could hold a jdt.ls job thread
+(plus the command lock behind it) for its whole duration. A watchdog now kills the process at the
+deadline whatever it is doing, and doubles as the only cancellation check that works while the
+process is silent.
+
+**A busy server is not a failure.** IDE invocations pass `--noblock_for_lock` (startup option,
+verified on bazel 9.2: exit 9, does not restart a running server), and "Another command (pid=...)"
+on stderr is recognised. Both surface as a distinct busy state: a short fixed retry window in the
+[FailureGate](server/src/io/github/sorteam/bazel/jdtls/FailureGate.java) that never escalates the
+exponential backoff, and a status bar entry saying the IDE is waiting - instead of an IDE that
+silently looks hung.
+
+**Refreshes wait for git.** [DiscoveryRefreshJob](server/src/io/github/sorteam/bazel/jdtls/DiscoveryRefreshJob.java)
+reschedules while `index.lock` / `MERGE_HEAD` / a rebase directory exists
+([GitState](server/src/io/github/sorteam/bazel/jdtls/GitState.java)), bounded at five minutes so a
+crashed git cannot silence refreshes. Refreshing against a half-checked-out tree imports a mix of
+two branches and prunes projects that come back seconds later. For the same reason the cache stamp
+is the BUILD-file digest taken *before* discovery: if the tree moved mid-refresh, the data is saved
+unstamped and another pass runs.
+
+**A partial aquery must not empty a populated classpath.** With `--keep_going` a label whose package
+failed to load simply has no Javac action in the output. Storing that as "empty classpath" floods
+the workspace with false errors and forces a full rebuild twice. A label that genuinely lost its
+sources disappears from discovery instead, so an empty answer for a previously populated label keeps
+the cached jars ([BazelClasspathCache](server/src/io/github/sorteam/bazel/jdtls/BazelClasspathCache.java)).
 
 **Exit code 3 is success.** `--keep_going` returns 3 when some package fails to load - a broken
 `BUILD` somewhere, or an unreachable registry. The java targets still come back, so 3 is accepted and

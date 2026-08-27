@@ -1,5 +1,30 @@
 # Changelog
 
+## Unreleased
+
+Hardening against the branch-switch stampede: the java process no longer hangs or spins for minutes
+after `git checkout`.
+
+- Classpath containers are republished only when their content actually changed - jar list, order,
+  and each jar's size and modification time. A refresh that resolves an identical classpath keeps
+  the container, so JDT no longer drops and re-indexes every jar behind all of them on each branch
+  switch.
+- The command timeout now also covers a bazel client that is silent on stdout. Previously a client
+  waiting for the server lock could hold a language-server job thread for the entire duration of a
+  terminal build, and cancellation was ignored while it waited.
+- The IDE's bazel invocations pass `--noblock_for_lock` (new setting `bazelJava.noblockForLock`,
+  default on): when a terminal build holds the server lock the IDE fails fast, shows "waiting for
+  another bazel command" in the status bar, and retries on a short fixed interval instead of
+  queueing behind the build or escalating the failure backoff.
+- A refresh no longer starts while git is rewriting the working tree (checkout, rebase, merge); it
+  waits for the operation to finish, bounded so a stale `index.lock` cannot silence refreshes.
+- A partial aquery answer - normal with `--keep_going` during a checkout or with an unreachable
+  external repository - can no longer wipe populated classpaths: an empty answer for a label that
+  previously had jars keeps the cached jars, and the import report counts how often that happened.
+- The cache stamp is taken before discovery runs, so a second branch switch landing mid-refresh
+  schedules another pass instead of silently marking stale data as current.
+- The automatic background build defers while the bazel server is busy with someone else's command.
+
 ## 0.3.0
 
 First public release.

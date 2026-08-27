@@ -35,6 +35,15 @@ public final class BazelSession {
     private final java.util.concurrent.atomic.AtomicBoolean classpathBuildStarted =
             new java.util.concurrent.atomic.AtomicBoolean();
 
+    /*
+        ContainerStamp of the container last handed to JDT, per project. Publishing an identical
+        container again makes JDT drop and re-index every jar behind it, so the resolve job compares
+        against this before calling setClasspathContainer. Seeded by the container initializer with
+        what it published from the disk cache, and cleared by an explicit refresh so that one always
+        republishes.
+     */
+    private final Map<String, Long> publishedContainerStamps = new ConcurrentHashMap<>();
+
     private final FailureGate discoveryGate;
     private final FailureGate classpathGate;
 
@@ -89,6 +98,14 @@ public final class BazelSession {
         return classpathGate;
     }
 
+    public Long getPublishedContainerStamp(String projectName) {
+        return publishedContainerStamps.get(projectName);
+    }
+
+    public void setPublishedContainerStamp(String projectName, long stamp) {
+        publishedContainerStamps.put(projectName, stamp);
+    }
+
     /*
         Explicit refresh: forget everything cached and lift any backoff window, so a developer who
         just fixed a BUILD file or reconnected to the network does not wait out the backoff.
@@ -97,6 +114,7 @@ public final class BazelSession {
         workspace.reloadSettings();
         BazelBinary.invalidate();
         cache.clear();
+        publishedContainerStamps.clear();
         if (dropDiskCache) {
             store.invalidate();
         }

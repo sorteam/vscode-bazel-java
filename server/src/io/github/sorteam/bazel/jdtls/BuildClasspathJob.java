@@ -29,8 +29,14 @@ public final class BuildClasspathJob extends Job {
 
     private static final long TIMEOUT_SECONDS = TimeUnit.HOURS.toSeconds(1);
 
+    /* 20 deferrals of 30 s each: ten minutes of politeness, then give up quietly. */
+    private static final int MAX_BUSY_DEFERRALS = 20;
+    private static final long BUSY_DEFER_MILLIS = 30_000;
+
     private final BazelSession session;
     private final List<String> labels;
+
+    private int busyDeferrals;
 
     private BuildClasspathJob(BazelSession session, List<String> labels) {
         super("Building bazel classpath for " + session.getWorkspace().getRoot().getName());
@@ -77,6 +83,16 @@ public final class BuildClasspathJob extends Job {
 
     @Override
     protected IStatus run(IProgressMonitor monitor) {
+        /*
+            Right after a branch switch the developer's own build is usually already running, and a
+            repository-wide background build competing with it for the server lock helps nobody -
+            it either queues or, worse, makes the terminal build queue. Defer while the server was
+            recently seen busy, bounded so a permanently busy server does not park this forever.
+         */
+        if (session.getWorkspace().wasBusyRecently() && ++busyDeferrals <= MAX_BUSY_DEFERRALS) {
+            schedule(BUSY_DEFER_MILLIS);
+            return Status.OK_STATUS;
+        }
         long started = System.currentTimeMillis();
         try {
             File executionRoot = session.getWorkspace().executionRoot(monitor);
@@ -109,6 +125,10 @@ public final class BuildClasspathJob extends Job {
                     labels.size(), elapsed));
             DiscoveryRefreshJob.scheduleFor(session, true);
         } catch (CoreException e) {
+            if (BazelWorkspace.isServerBusy(e) && ++busyDeferrals <= MAX_BUSY_DEFERRALS) {
+                schedule(BUSY_DEFER_MILLIS);
+                return Status.OK_STATUS;
+            }
             BazelLog.info("Bazel: build for the classpath failed: " + e.getMessage());
             return Status.OK_STATUS;
         }

@@ -84,13 +84,17 @@
         },
         "bazelJava.targets": {
           "type": "array",
-          "items": { "type": "string" },
+          "items": {
+            "type": "string"
+          },
           "default": [],
           "markdownDescription": "Target patterns to import, for example `//services/...`. Empty means the whole repository, or the `directories:` block of `.bazelproject` when `#bazelJava.useBazelProject#` is on. Narrowing this is the single biggest win on a large monorepo."
         },
         "bazelJava.excludeTargets": {
           "type": "array",
-          "items": { "type": "string" },
+          "items": {
+            "type": "string"
+          },
           "default": [],
           "markdownDescription": "Target patterns to subtract from the imported set, for example `//platform/infra/...`."
         },
@@ -101,7 +105,10 @@
         },
         "bazelJava.importMode": {
           "type": "string",
-          "enum": ["lazy", "eager"],
+          "enum": [
+            "lazy",
+            "eager"
+          ],
           "default": "lazy",
           "markdownDescription": "`lazy` imports the configured scope and, when a java file outside it is opened, provisions that one package on demand. `eager` imports the configured scope and nothing else. With no scope configured the two are identical, since everything is already in scope."
         },
@@ -117,7 +124,10 @@
         },
         "bazelJava.buildOnImport": {
           "type": "string",
-          "enum": ["background", "off"],
+          "enum": [
+            "background",
+            "off"
+          ],
           "default": "background",
           "markdownDescription": "`aquery` reports the jars a build *would* consume, not jars that are current. A jar produced before its inputs last changed is still on disk and gets indexed, so the IDE shows a stale API - a field added last week reads as `undefined` while `bazel build` succeeds. `background` builds the imported targets once per session to keep them current (incremental, so a no-op on an up-to-date repository). `off` never builds; use `Bazel: Build Classpath` by hand."
         },
@@ -130,6 +140,11 @@
           "type": "number",
           "default": 120,
           "description": "Timeout for a single bazel query or aquery. Short on purpose: a hung query must not hang the IDE."
+        },
+        "bazelJava.noblockForLock": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Fail fast and retry shortly when another bazel command - usually a terminal build - holds the server lock, instead of queueing behind it for the whole build. Applies `--noblock_for_lock` to the IDE's bazel invocations; the status bar shows when the IDE is waiting. Turn off to restore queueing."
         },
         "bazelJava.backoffMaxSeconds": {
           "type": "number",

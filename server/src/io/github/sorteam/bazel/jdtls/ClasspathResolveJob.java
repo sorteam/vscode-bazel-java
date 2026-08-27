@@ -102,10 +102,19 @@ public final class ClasspathResolveJob extends Job {
         }
 
         try {
+            /*
+                Captured before any bazel work: this digest describes the tree the resolved
+                classpaths belong to. Stamping a digest taken after the fact would mark data from
+                the old tree as current when a branch switch lands mid-resolve.
+             */
+            String buildFilesDigest = Digests.buildFilesDigest(
+                    session.getWorkspace().getRoot().toPath());
             File executionRoot = executionRoot(monitor);
 
+            int published = 0;
+            int unchanged = 0;
             for (Request request : urgent) {
-                resolveOne(request, executionRoot, monitor);
+                published += resolveOne(request, executionRoot, monitor) ? 1 : 0;
             }
 
             Set<String> labels = new LinkedHashSet<>();
@@ -113,15 +122,38 @@ public final class ClasspathResolveJob extends Job {
             session.getCache().warmAll(new ArrayList<>(labels), monitor);
 
             for (Request request : batch) {
-                publish(request, executionRoot);
+                if (publish(request, executionRoot)) {
+                    published++;
+                } else {
+                    unchanged++;
+                }
+            }
+            if (published + unchanged > 1) {
+                BazelLog.info(String.format(
+                        "Bazel: %d classpath container(s) published, %d unchanged (kept, no"
+                                + " reindex)", published, unchanged));
             }
             session.getStore().setExecutionRoot(executionRoot.getAbsolutePath());
-            session.getStore().stamp(session.getSettings());
+            /*
+                Only the cold import path stamps from here - the store has no stamp yet then, and
+                someone has to mark the cache usable. Everywhere else DiscoveryRefreshJob owns the
+                stamp: it is the one that actually ran discovery, so it knows which tree the data
+                describes. Stamping unconditionally here used to be able to mask a BUILD edit that
+                happened between a cached discovery and this resolve.
+             */
+            if (!session.getStore().hasStamp()) {
+                session.getStore().stamp(session.getSettings(), buildFilesDigest);
+            }
             session.getStore().save();
             session.getClasspathGate().recordSuccess();
             BuildClasspathJob.startIfConfigured(session);
         } catch (CoreException e) {
-            session.getClasspathGate().recordFailure(e.getMessage());
+            if (BazelWorkspace.isServerBusy(e)) {
+                // A terminal build holds the server; short fixed retry, no failure escalation.
+                session.getClasspathGate().recordBusy(e.getMessage());
+            } else {
+                session.getClasspathGate().recordFailure(e.getMessage());
+            }
             // Put the work back so the next attempt, after the backoff, still has it.
             synchronized (this) {
                 batch.forEach(request ->
@@ -146,21 +178,45 @@ public final class ClasspathResolveJob extends Job {
         return workspace.executionRoot(monitor);
     }
 
-    private void resolveOne(Request request, File executionRoot, IProgressMonitor monitor)
+    private boolean resolveOne(Request request, File executionRoot, IProgressMonitor monitor)
             throws CoreException {
         for (String label : request.allLabels()) {
             session.getCache().jarsFor(label, monitor);
         }
-        publish(request, executionRoot);
+        return publish(request, executionRoot);
     }
 
-    private void publish(Request request, File executionRoot) {
-        BazelClasspathContainer container = build(request, executionRoot);
+    /*
+        Returns true when a container was actually handed to JDT. Republishing an identical one is
+        not a no-op: JDT forgets what it read from every jar behind the container and re-indexes all
+        of them - on a large repository ~1.6k jars and over a gigabyte of index writes, which is
+        most of what "the java process hangs after a branch switch" was. The stamp covers the jar
+        list, its order, and each jar's size and mtime, so a jar rebuilt in place still republishes.
+     */
+    private boolean publish(Request request, File executionRoot) {
+        Set<String> mainJars = new LinkedHashSet<>();
+        Set<String> testJars = new LinkedHashSet<>();
+        request.mainLabels().forEach(label -> mainJars.addAll(jars(label)));
+        request.testLabels().forEach(label -> testJars.addAll(jars(label)));
+        testJars.removeAll(mainJars);
+
+        String projectName = request.javaProject().getProject().getName();
+        long stamp = ContainerStamp.of(executionRoot, mainJars, testJars);
+        Long lastPublished = session.getPublishedContainerStamp(projectName);
+        if (lastPublished != null && lastPublished == stamp) {
+            session.getReport().countContainerUnchanged();
+            return false;
+        }
+
+        BazelClasspathContainer container =
+                BazelClasspathContainer.fromJars(executionRoot, mainJars, testJars);
         try {
             JavaCore.setClasspathContainer(BazelClasspathContainer.CONTAINER_PATH,
                     new IJavaProject[] { request.javaProject() },
                     new IClasspathContainer[] { container },
                     new NullProgressMonitor());
+            session.setPublishedContainerStamp(projectName, stamp);
+            session.getReport().countContainerPublished();
             session.getReport().countJars(container.getResolvedCount(),
                     container.getMissingCount());
             if (container.getMissingCount() > 0) {
@@ -173,15 +229,7 @@ public final class ClasspathResolveJob extends Job {
             BazelLog.exception("Bazel: failed to set the classpath container for "
                     + request.javaProject().getProject().getName(), e);
         }
-    }
-
-    private BazelClasspathContainer build(Request request, File executionRoot) {
-        Set<String> mainJars = new LinkedHashSet<>();
-        Set<String> testJars = new LinkedHashSet<>();
-        request.mainLabels().forEach(label -> mainJars.addAll(jars(label)));
-        request.testLabels().forEach(label -> testJars.addAll(jars(label)));
-        testJars.removeAll(mainJars);
-        return BazelClasspathContainer.fromJars(executionRoot, mainJars, testJars);
+        return true;
     }
 
     private List<String> jars(String label) {

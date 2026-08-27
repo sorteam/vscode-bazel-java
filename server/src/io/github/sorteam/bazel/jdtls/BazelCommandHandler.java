@@ -112,6 +112,9 @@ public class BazelCommandHandler implements IDelegateCommandHandler {
             entry.put("backoffSeconds", Math.max(
                     session.getDiscoveryGate().remainingSeconds(),
                     session.getClasspathGate().remainingSeconds()));
+            entry.put("serverBusy", session.getWorkspace().wasBusyRecently()
+                    || session.getDiscoveryGate().isBusyWaiting()
+                    || session.getClasspathGate().isBusyWaiting());
             entry.put("missingJars", session.getReport().getMissingJars());
             status.put(session.getWorkspace().getRoot().getAbsolutePath(), entry);
         }

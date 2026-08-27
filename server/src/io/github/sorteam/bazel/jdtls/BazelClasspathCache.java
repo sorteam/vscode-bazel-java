@@ -3,9 +3,11 @@ package io.github.sorteam.bazel.jdtls;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.function.Function;
 
 import org.eclipse.core.runtime.CoreException;
 import org.eclipse.core.runtime.IProgressMonitor;
@@ -148,6 +150,16 @@ public final class BazelClasspathCache {
             chunk.forEach(label -> resolved.putIfAbsent(label, List.of()));
         }
 
+        if (force) {
+            int kept = dropEmptiesThatWerePopulated(resolved, this::previousJars);
+            if (kept > 0) {
+                session.getReport().countKeptStale(kept);
+                BazelLog.warnOnce("kept-stale:" + session.getWorkspace().getRoot().getName(),
+                        String.format("Bazel: aquery returned no Javac action for %d label(s) that"
+                                + " previously had a classpath (partial loading after a branch"
+                                + " switch?); keeping the cached jars", kept));
+            }
+        }
         store(resolved, force);
         long elapsed = System.currentTimeMillis() - started;
         long withJars = resolved.values().stream().filter(jars -> !jars.isEmpty()).count();
@@ -156,6 +168,43 @@ public final class BazelClasspathCache {
                 resolved.size(), elapsed, withJars));
         session.getReport().phase("classpath", elapsed);
         return resolved;
+    }
+
+    /*
+        A force refresh re-queries labels that are already cached, and --keep_going means the answer
+        can be partial: a label whose package failed to load simply has no Javac action in the
+        output. Taking that as "this target now has an empty classpath" replaces a working container
+        with an empty one, floods the workspace with false errors, and forces a full rebuild twice -
+        once to break it and once to heal it on the next successful pass. A label that genuinely
+        lost its sources disappears from discovery instead (BazelQuery.parse drops sourceless
+        targets), so an empty answer for a previously populated label is dropped, not stored.
+     */
+    static int dropEmptiesThatWerePopulated(Map<String, List<String>> resolved,
+            Function<String, List<String>> previous) {
+        int dropped = 0;
+        Iterator<Map.Entry<String, List<String>>> entries = resolved.entrySet().iterator();
+        while (entries.hasNext()) {
+            Map.Entry<String, List<String>> entry = entries.next();
+            if (!entry.getValue().isEmpty()) {
+                continue;
+            }
+            List<String> before = previous.apply(entry.getKey());
+            if (before != null && !before.isEmpty()) {
+                entries.remove();
+                dropped++;
+            }
+        }
+        return dropped;
+    }
+
+    private List<String> previousJars(String label) {
+        synchronized (this) {
+            List<String> cached = jarsByLabel.get(label);
+            if (cached != null) {
+                return cached;
+            }
+        }
+        return session.getStore().peekJars(label);
     }
 
     private void runAquery(IProgressMonitor monitor, AqueryParser parser, String expression)

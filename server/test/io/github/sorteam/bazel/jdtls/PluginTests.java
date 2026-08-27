@@ -36,6 +36,12 @@ public final class PluginTests {
         settingsUniverseHandlesExclusions();
         queryParsesTargetsAndSkipsSourcelessRules();
         querySkipsAmbiguousSourceRoots();
+        gitStateSeesCheckoutRebaseAndWorktrees();
+        containerStampTracksJarsOrderAndModification();
+        partialAqueryKeepsPopulatedClasspaths();
+        failureGateBusyWindowDoesNotEscalate();
+        watchdogKillsASilentProcess();
+        busyServerIsClassifiedAsBusyNotAsFailure();
 
         System.out.printf("%d checks, %d failure(s)%n", checks, FAILURES.size());
         FAILURES.forEach(failure -> System.out.println("  FAIL " + failure));
@@ -344,6 +350,154 @@ public final class PluginTests {
         check("a source in the package root uses the package",
                 "a/b".equals(BazelQuery.commonSourceRoot("a/b", List.of("//a/b:X.java"))),
                 String.valueOf(BazelQuery.commonSourceRoot("a/b", List.of("//a/b:X.java"))));
+    }
+
+    /* ------------------------------------------------- branch-switch hardening */
+
+    private static void gitStateSeesCheckoutRebaseAndWorktrees() throws IOException {
+        Path repo = Files.createTempDirectory("bazel-gitstate");
+        check("no .git means no git operation",
+                !GitState.operationInProgress(repo.toFile()), "");
+
+        Path gitDir = repo.resolve(".git");
+        Files.createDirectories(gitDir);
+        check("a quiet repository is not busy",
+                !GitState.operationInProgress(repo.toFile()), "");
+
+        Files.writeString(gitDir.resolve("index.lock"), "");
+        check("index.lock means a checkout is running",
+                GitState.operationInProgress(repo.toFile()), "");
+        Files.delete(gitDir.resolve("index.lock"));
+
+        Files.writeString(gitDir.resolve("MERGE_HEAD"), "abc");
+        check("MERGE_HEAD means a merge is running",
+                GitState.operationInProgress(repo.toFile()), "");
+        Files.delete(gitDir.resolve("MERGE_HEAD"));
+
+        Path worktree = Files.createTempDirectory("bazel-gitstate-wt");
+        Files.writeString(worktree.resolve(".git"),
+                "gitdir: " + gitDir.toAbsolutePath() + "\n");
+        check("a worktree resolves its gitdir file",
+                gitDir.toFile().equals(GitState.gitDirectory(worktree.toFile())),
+                String.valueOf(GitState.gitDirectory(worktree.toFile())));
+        Files.writeString(gitDir.resolve("index.lock"), "");
+        check("a checkout is visible through the worktree",
+                GitState.operationInProgress(worktree.toFile()), "");
+    }
+
+    private static void containerStampTracksJarsOrderAndModification() throws Exception {
+        Path root = Files.createTempDirectory("bazel-stamp");
+        Files.writeString(root.resolve("a.jar"), "aa");
+        Files.writeString(root.resolve("b.jar"), "bbbb");
+
+        long stamp = ContainerStamp.of(root.toFile(), List.of("a.jar", "b.jar"), List.of());
+        check("same jars, same stamp",
+                stamp == ContainerStamp.of(root.toFile(), List.of("a.jar", "b.jar"), List.of()),
+                "");
+        check("order is part of the identity",
+                stamp != ContainerStamp.of(root.toFile(), List.of("b.jar", "a.jar"), List.of()),
+                "");
+        check("the main/test split is part of the identity",
+                stamp != ContainerStamp.of(root.toFile(), List.of("a.jar"), List.of("b.jar")), "");
+
+        long before = ContainerStamp.of(root.toFile(), List.of("a.jar"), List.of());
+        root.resolve("a.jar").toFile().setLastModified(
+                root.resolve("a.jar").toFile().lastModified() + 5000);
+        check("a jar rebuilt in place changes the stamp",
+                before != ContainerStamp.of(root.toFile(), List.of("a.jar"), List.of()), "");
+    }
+
+    private static void partialAqueryKeepsPopulatedClasspaths() {
+        Map<String, List<String>> resolved = new java.util.LinkedHashMap<>();
+        resolved.put("//a:lib", List.of());          // was populated -> partial answer, keep old
+        resolved.put("//b:lib", List.of());          // was empty -> legitimately empty
+        resolved.put("//c:lib", List.of("new.jar")); // real answer
+
+        Map<String, List<String>> previous =
+                Map.of("//a:lib", List.of("old.jar"), "//b:lib", List.of());
+        int dropped = BazelClasspathCache.dropEmptiesThatWerePopulated(resolved, previous::get);
+
+        check("only the previously populated empty answer is dropped",
+                dropped == 1 && !resolved.containsKey("//a:lib"), String.valueOf(resolved));
+        check("a label that was always empty stays remembered as empty",
+                List.of().equals(resolved.get("//b:lib")), String.valueOf(resolved));
+        check("real answers pass through",
+                List.of("new.jar").equals(resolved.get("//c:lib")), String.valueOf(resolved));
+    }
+
+    private static void failureGateBusyWindowDoesNotEscalate() {
+        FailureGate gate = new FailureGate("test", 300);
+        gate.recordBusy("terminal build");
+        check("busy opens a retry window", gate.shouldSkip(), "");
+        check("busy is not a failure", gate.getConsecutiveFailures() == 0,
+                String.valueOf(gate.getConsecutiveFailures()));
+        check("busy window is short", gate.remainingSeconds() <= 16,
+                String.valueOf(gate.remainingSeconds()));
+        check("busy state is visible", gate.isBusyWaiting(), gate.describe());
+        gate.recordSuccess();
+        check("success clears the busy window",
+                !gate.shouldSkip() && !gate.isBusyWaiting(), gate.describe());
+        gate.recordBusy("again");
+        gate.recordFailure("real failure");
+        check("a real failure replaces the busy state",
+                !gate.isBusyWaiting() && gate.getConsecutiveFailures() == 1, gate.describe());
+    }
+
+    /*
+        The regression behind these two: the command timeout was only enforced after stdout hit EOF,
+        so a bazel client waiting for the server lock - silent on stdout - hung a jdt.ls job thread
+        for as long as the terminal build ran, commandLock held.
+     */
+    private static void watchdogKillsASilentProcess() throws Exception {
+        Path root = Files.createTempDirectory("bazel-watchdog");
+        Path fake = root.resolve("fake-bazel.sh");
+        Files.writeString(fake, "#!/bin/sh\nsleep 30\n");
+        fake.toFile().setExecutable(true);
+
+        System.setProperty("bazel.binary", fake.toString());
+        try {
+            BazelWorkspace workspace = new BazelWorkspace(root.toFile());
+            long started = System.currentTimeMillis();
+            try {
+                workspace.runStreaming(null, line -> { }, 2, "query", "//...");
+                check("a silent process must time out", false, "no exception");
+            } catch (org.eclipse.core.runtime.CoreException e) {
+                long elapsed = System.currentTimeMillis() - started;
+                check("killed by the watchdog while stdout was silent",
+                        elapsed < 8000 && e.getMessage().contains("timed out after 2 s"),
+                        elapsed + " ms, " + e.getMessage());
+                check("a timeout is not classified as busy",
+                        !BazelWorkspace.isServerBusy(e), e.getMessage());
+            }
+        } finally {
+            System.clearProperty("bazel.binary");
+        }
+    }
+
+    private static void busyServerIsClassifiedAsBusyNotAsFailure() throws Exception {
+        Path root = Files.createTempDirectory("bazel-busy");
+        Path fake = root.resolve("fake-bazel.sh");
+        // What the real client prints with --noblock_for_lock when the lock is held (bazel 9.2).
+        Files.writeString(fake, "#!/bin/sh\n"
+                + "echo 'Another command (pid=12345) is running. Exiting immediately.' 1>&2\n"
+                + "exit 9\n");
+        fake.toFile().setExecutable(true);
+
+        System.setProperty("bazel.binary", fake.toString());
+        try {
+            BazelWorkspace workspace = new BazelWorkspace(root.toFile());
+            check("the busy flag starts clear", !workspace.wasBusyRecently(), "");
+            try {
+                workspace.run(null, "query", "//...");
+                check("exit 9 must not pass as success", false, "no exception");
+            } catch (org.eclipse.core.runtime.CoreException e) {
+                check("exit 9 with the busy line is classified as busy",
+                        BazelWorkspace.isServerBusy(e), e.getMessage());
+            }
+            check("the workspace remembers the busy server", workspace.wasBusyRecently(), "");
+        } finally {
+            System.clearProperty("bazel.binary");
+        }
     }
 
     /* ------------------------------------------------------------------ util */

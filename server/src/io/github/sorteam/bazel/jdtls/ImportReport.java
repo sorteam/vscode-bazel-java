@@ -19,6 +19,9 @@ public final class ImportReport {
     private final AtomicInteger cacheHits = new AtomicInteger();
     private final AtomicInteger missingJars = new AtomicInteger();
     private final AtomicInteger resolvedJars = new AtomicInteger();
+    private final AtomicInteger publishedContainers = new AtomicInteger();
+    private final AtomicInteger unchangedContainers = new AtomicInteger();
+    private final AtomicInteger keptStaleClasspaths = new AtomicInteger();
 
     private volatile int discoveredTargets;
     private volatile int provisionedProjects;
@@ -49,6 +52,20 @@ public final class ImportReport {
         missingJars.addAndGet(missing);
     }
 
+    public void countContainerPublished() {
+        publishedContainers.incrementAndGet();
+    }
+
+    /* A container whose stamp matched and was therefore not republished (no reindex). */
+    public void countContainerUnchanged() {
+        unchangedContainers.incrementAndGet();
+    }
+
+    /* Labels whose aquery answer came back empty while the cache had jars; the cache won. */
+    public void countKeptStale(int labels) {
+        keptStaleClasspaths.addAndGet(labels);
+    }
+
     public void setDiscoveredTargets(int value) {
         discoveredTargets = value;
     }
@@ -76,6 +93,13 @@ public final class ImportReport {
         out.append("  classpath cache hits: ").append(cacheHits.get()).append('\n');
         out.append("  classpath jars     : ").append(resolvedJars.get())
                 .append(" resolved, ").append(missingJars.get()).append(" missing on disk\n");
+        out.append("  containers         : ").append(publishedContainers.get())
+                .append(" published, ").append(unchangedContainers.get())
+                .append(" unchanged (kept, no reindex)\n");
+        if (keptStaleClasspaths.get() > 0) {
+            out.append("  kept stale classpaths: ").append(keptStaleClasspaths.get())
+                    .append(" label(s) answered empty by a partial aquery\n");
+        }
         phaseMillis.forEach((name, millis) ->
                 out.append("  phase ").append(name).append(" : ").append(millis).append(" ms\n"));
         notes.forEach((key, value) ->
