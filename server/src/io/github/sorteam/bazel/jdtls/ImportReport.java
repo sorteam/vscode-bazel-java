@@ -6,8 +6,8 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 /*
     Counters and phase timings for the last import, surfaced by the "Bazel: Show Import Report"
-    command. Every number in PERFORMANCE_PLAN.md was reconstructed by grepping the jdt.ls log after
-    the fact; this makes the same numbers available without that archaeology.
+    command. The performance work was originally measured by grepping the jdt.ls log after the
+    fact; this makes the same numbers available without that archaeology.
  */
 public final class ImportReport {
 
