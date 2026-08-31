@@ -160,22 +160,21 @@ function activate(context) {
       const backoff = entries.reduce((max, entry) => Math.max(max, entry.backoffSeconds || 0), 0);
       const missing = entries.reduce((sum, entry) => sum + (entry.missingJars || 0), 0);
       const busy = entries.some((entry) => entry.serverBusy);
-      const symlinks = entries.flatMap((entry) => entry.convenienceSymlinks || []);
-      if (symlinks.length > 0) {
+      const blocked = entries.find((entry) => entry.needsFix);
+      if (blocked) {
         /*
-          First, ahead of every transient state: this one can hang the language server outright.
-          jdt.ls follows symlinks in its first workspace scan, and that scan runs before
-          java.project.resourceFilters is applied, so a bazel-out symlink sends it into the whole
-          action output tree with no setting able to stop it.
+          Ahead of every transient state, because this one is not transient: bazel cannot fetch an
+          external repository, so no amount of waiting produces a classpath. Nothing about the
+          bazel-* symlinks is reported here any more - they are excluded from the language server's
+          build-file scan on every import, and they are what the rest of the repository reads
+          generated output through.
         */
-        status.text = `$(alert) JBazel: ${symlinks.join(", ")} in the repository root`;
+        status.text = "$(alert) JBazel: bazel cannot fetch a repository";
         status.tooltip =
-          "These are bazel's convenience symlinks into the output base. jdt.ls follows symlinks " +
-          "during its first workspace scan, before resource filters apply, so they can park the " +
-          "Java import in the bazel output tree. Add\n\n" +
-          "  common --experimental_convenience_symlinks=ignore\n\n" +
-          "to the repository's bazelrc, then delete them. Builds started by this extension " +
-          "already pass that flag; these came from a build outside the IDE.";
+          "The classpath cannot be resolved until bazel can fetch its external repositories. " +
+          "This does not clear on its own - fix it, then editing MODULE.bazel or running " +
+          "'JBazel: Refresh Classpath' retries at once.\n\n" +
+          (blocked.needsFixDetail || "See the import report for the full bazel error.");
         status.show();
       } else if (busy) {
         // Not an error: a terminal build holds the bazel server lock and the IDE is waiting it out.

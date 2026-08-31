@@ -143,18 +143,21 @@ re-resolves every project, from re-indexing the whole repository.
 [BuildClasspathJob](server/src/io/github/sorteam/bazel/jdtls/BuildClasspathJob.java) additionally
 fingerprints the jars around its build so an up-to-date build does not even trigger a refresh.
 
-**The IDE never creates the bazel-* convenience symlinks.** `build` and `test` started from here
-carry `--experimental_convenience_symlinks=ignore`
-([BazelWorkspace.buildCommand](server/src/io/github/sorteam/bazel/jdtls/BazelWorkspace.java)). jdt.ls
-follows symlinks in its first workspace scan (`UnifiedTree.isRecursiveLink`), and that scan runs
-before `java.project.resourceFilters` exists - `configureFilters()` only runs once
-`initializeProjects()` has returned - so a `bazel-out` symlink descends the whole action output tree
-and no exclude setting can stop it: the import parks forever. `ignore` neither creates nor deletes,
-so a developer's own `bazel-bin` stays where their terminal builds put it. Symlinks found in the root
-are reported rather than removed - they are the developer's - via
-[BazelWorkspace.convenienceSymlinks](server/src/io/github/sorteam/bazel/jdtls/BazelWorkspace.java),
-the status bar and the import report. Only `build` and `test` take the flag; it is a build option and
-`query` has no business receiving one.
+**The bazel output tree is fenced off from the language server's scan, and the symlinks are left
+alone.** jdt.ls finds build files with `BasicFileDetector`, which walks the workspace as
+`Files.walkFileTree(root, EnumSet.of(FOLLOW_LINKS), ...)`, so one `bazel-out` in the root used to send
+the import into the whole action output tree. The same detector seeds its exclusions from
+`Preferences.getJavaImportExclusions()` and returns `SKIP_SUBTREE` on a match, so
+[ImportExclusions](server/src/io/github/sorteam/bazel/jdtls/ImportExclusions.java) writes the output
+paths there from
+[BazelProjectImporter.applies](server/src/io/github/sorteam/bazel/jdtls/BazelProjectImporter.java) -
+which runs at importer order 150, ahead of gradle (300), maven (400), eclipse (1000) and
+invisible-project (1500) detection, and on the path where this importer *declines* as well, since that
+is when jdt.ls falls through to those. The symlinks themselves are the developer's and the rest of the
+repository's: they are detected by target rather than by name (`--symlink_prefix` renames them) and
+reported, never removed. `--experimental_convenience_symlinks=ignore` goes only on builds that run in
+an IDE-owned output base, where bazel would otherwise repoint `bazel-bin` at outputs only the IDE
+built.
 
 **The command timeout covers a silent process.** `waitFor(timeout)` only runs after stdout hits EOF,
 and a bazel client waiting for the server lock writes nothing to stdout - so the timeout used to

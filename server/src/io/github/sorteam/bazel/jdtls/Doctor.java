@@ -12,6 +12,9 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
 
+import org.eclipse.jdt.ls.core.internal.JavaLanguageServerPlugin;
+import org.eclipse.jdt.ls.core.internal.preferences.PreferenceManager;
+
 /*
     One report answering "why is this repository slow / noisy / red", from the side of the setup that
     the plugin cannot fix by itself.
@@ -45,6 +48,20 @@ final class Doctor {
     private Doctor() {
     }
 
+    /*
+        The exclusions the language server is actually running with. Same internal preferences object
+        the importer writes to, so what Doctor reports is what the next scan will do - as opposed to
+        what settings.json says, which is what the extension half of the report shows.
+     */
+    private static List<String> importExclusions() {
+        PreferenceManager manager = JavaLanguageServerPlugin.getPreferencesManager();
+        if (manager == null || manager.getPreferences() == null) {
+            return List.of();
+        }
+        List<String> exclusions = manager.getPreferences().getJavaImportExclusions();
+        return exclusions == null ? List.of() : exclusions;
+    }
+
     static String render(BazelSession session) {
         List<String> problems = new ArrayList<>();
         List<String> facts = new ArrayList<>();
@@ -58,22 +75,31 @@ final class Doctor {
         facts.add("projects imported   : " + report.getProvisionedProjects());
 
         /*
-            The one misconfiguration that hangs the language server outright rather than slowing it
-            down: jdt.ls follows symlinks in its first workspace scan, and that scan runs before
-            java.project.resourceFilters is applied, so nothing on the settings side can stop it.
+            The symlinks are fine and are meant to stay - the rest of the repository reads generated
+            output through them. What matters is whether jdt.ls's build-file scan, which follows
+            symlinks, is fenced off from them; the importer does that on every attempt, so a gap here
+            means someone pinned java.import.exclusions to a list of their own.
          */
         List<String> symlinks = workspace.convenienceSymlinks();
         if (symlinks.isEmpty()) {
             facts.add("convenience symlinks: none in the repository root");
         } else {
-            problems.add("The repository root holds " + String.join(", ", symlinks) + ".\n"
-                    + "      jdt.ls follows symlinks during its first workspace scan, before"
-                    + " resource filters\n"
-                    + "      apply, so these can park the Java import in the bazel output tree."
-                    + " Add to the bazelrc:\n"
-                    + "        common --experimental_convenience_symlinks=ignore\n"
-                    + "      then delete them. Builds started by this extension already pass that"
-                    + " flag.");
+            List<String> missing = ImportExclusions.missing(importExclusions(),
+                    ImportExclusions.patterns(root, symlinks, workspace.peekOutputBase()));
+            if (missing.isEmpty()) {
+                facts.add("convenience symlinks: " + String.join(", ", symlinks)
+                        + " (excluded from the java build-file scan)");
+            } else {
+                problems.add("The repository root holds " + String.join(", ", symlinks)
+                        + ", and java.import.exclusions\n"
+                        + "      does not cover them. jdt.ls looks for build files by walking the"
+                        + " workspace with\n"
+                        + "      FOLLOW_LINKS, so an unfenced bazel-out can park the import in the"
+                        + " output tree.\n"
+                        + "      Keep the symlinks - other tooling reads them - and add to"
+                        + " java.import.exclusions:\n"
+                        + "        " + String.join("\n        ", missing));
+            }
         }
 
         for (Path heavy : heavyDirectories(root.toPath())) {
@@ -182,12 +208,13 @@ final class Doctor {
         }
 
         String text = contents.toString();
-        if (!text.contains("experimental_convenience_symlinks")) {
-            problems.add("No --experimental_convenience_symlinks in any bazelrc found. Builds"
-                    + " outside the IDE will\n"
-                    + "      keep recreating bazel-bin / bazel-out in the repository root. Add:\n"
-                    + "        common --experimental_convenience_symlinks=ignore");
-        }
+        /*
+            No check for --experimental_convenience_symlinks any more. 0.4.0 and 0.5.0 demanded it,
+            which was wrong: the symlinks are what everything else in the repository resolves
+            generated output through, and asking for them to be turned off fixed the java import by
+            breaking the TypeScript side. Keeping jdt.ls out of the output tree is the extension's
+            job (ImportExclusions), not a line in someone's bazelrc.
+         */
         if (!text.contains("disk_cache")) {
             facts.add("consider            : common --disk_cache=~/.cache/bazel-disk with"
                     + " --experimental_disk_cache_gc_max_size,\n"

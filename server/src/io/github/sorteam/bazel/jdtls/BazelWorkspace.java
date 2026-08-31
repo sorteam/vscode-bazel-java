@@ -37,6 +37,22 @@ public class BazelWorkspace {
 
     private static final int MAX_CAPTURED_ERRORS = 20;
 
+    /* Per ERROR line, how much of the traceback that follows it is kept. */
+    private static final int MAX_CAUSE_LINES = 6;
+    private static final int MAX_DETAIL_CHARS = 900;
+
+    /*
+        An external repository that cannot be fetched - a stale rules_jvm_external lock file, most
+        often - fails the analysis phase outright, so every classpath comes back empty. Unlike a busy
+        server this never resolves on its own: it needs MODULE.bazel or a lock file fixed, and the
+        gate says so instead of counting anonymous failures.
+     */
+    private static final List<String> FETCH_FAILURE_MARKERS = List.of(
+            "An error occurred during the fetch of repository",
+            "must be regenerated",
+            "REPIN=1");
+    public static final int STATUS_FETCH_BLOCKED = 10;
+
     /*
         The client exits with 9 when --noblock_for_lock is set and another command holds the lock
         (verified on bazel 9.2.0). The same value doubles as the IStatus code that marks a
@@ -90,13 +106,17 @@ public class BazelWorkspace {
     }
 
     /*
-        The bazel-* convenience symlinks present in the repository root, sorted, or an empty list.
+        The convenience symlinks present in the repository root, sorted, or an empty list.
 
-        Nothing this plugin does creates them any more, but a terminal build without
-        --experimental_convenience_symlinks=ignore in the repository's bazelrc does, and one of them
-        is enough to park the next jdt.ls workspace scan in the action output tree. They cannot be
-        removed from here - they are the developer's, and their own build put them there - so they
-        are reported instead, in the log, the import report and the status bar.
+        They belong to the developer and to everything else in the repository - a TypeScript config
+        that reads generated clients out of bazel-bin, most of all - so they are neither removed nor
+        argued with. What they need is to be kept out of the one scan that cannot survive them:
+        jdt.ls walks the workspace with FOLLOW_LINKS looking for build files, and one bazel-out is
+        enough to send it into the whole action output tree. See ImportExclusions.
+
+        Detected by target rather than by name: --symlink_prefix renames all of them, so the stable
+        signal is a root symlink that lands inside the output base (execroot / bazel-out), with the
+        historical bazel- prefix left as a last resort for the case where nothing is known yet.
      */
     public List<String> convenienceSymlinks() {
         File[] entries = root.listFiles();
@@ -105,12 +125,53 @@ public class BazelWorkspace {
         }
         List<String> found = new ArrayList<>();
         for (File entry : entries) {
-            if (entry.getName().startsWith("bazel-") && Files.isSymbolicLink(entry.toPath())) {
+            if (Files.isSymbolicLink(entry.toPath()) && leadsIntoOutputTree(entry)) {
                 found.add(entry.getName());
             }
         }
         Collections.sort(found);
         return found;
+    }
+
+    private boolean leadsIntoOutputTree(File symlink) {
+        File base = peekOutputBase();
+        String target;
+        try {
+            target = symlink.toPath().toRealPath().toString();
+        } catch (IOException e) {
+            // A dangling symlink cannot be walked into, but bazel will refresh it on the next
+            // build, so it is still one of ours if the name says so.
+            return symlink.getName().startsWith("bazel-");
+        }
+        String normalised = target.replace(File.separatorChar, '/');
+        if (base != null && normalised.startsWith(
+                base.getAbsolutePath().replace(File.separatorChar, '/') + "/")) {
+            return true;
+        }
+        return normalised.contains("/execroot/") || normalised.contains("/bazel-out/")
+                || symlink.getName().startsWith("bazel-");
+    }
+
+    /*
+        The output base of whatever bazel this workspace talks to, or null when nothing is known yet.
+        Taken from the configured dedicated base, otherwise derived from the execution root, which
+        is <output base>/execroot/<workspace> and is cached in ClasspathStore across sessions - so
+        this answers without running bazel, which matters at import time.
+     */
+    public File peekOutputBase() {
+        BazelSettings current = settings;
+        if (current.hasDedicatedOutputBase()) {
+            return outputBaseDirectory(current);
+        }
+        File execution = peekExecutionRoot();
+        if (execution == null) {
+            return null;
+        }
+        File execroot = execution.getParentFile();
+        if (execroot == null || !"execroot".equals(execroot.getName())) {
+            return null;
+        }
+        return execroot.getParentFile();
     }
 
     public synchronized BazelSettings reloadSettings() {
@@ -315,8 +376,12 @@ public class BazelWorkspace {
             return;
         }
         if (!ACCEPTED_EXIT_CODES.contains(exitCode)) {
-            throw new CoreException(error(summarise(command) + " failed with exit code " + exitCode
-                    + (capturedErrors.isEmpty() ? "" : ": " + firstError(capturedErrors)), null));
+            String message = summarise(command) + " failed with exit code " + exitCode
+                    + (capturedErrors.isEmpty() ? "" : ": " + failureDetail(capturedErrors));
+            throw new CoreException(isFetchFailure(capturedErrors)
+                    ? new Status(IStatus.ERROR, BazelClasspathContainerInitializer.PLUGIN_ID,
+                            STATUS_FETCH_BLOCKED, message, null)
+                    : error(message, null));
         }
         lastBusyNanos = 0;
         BazelLog.clear("bazel-busy:" + root.getName());
@@ -334,6 +399,53 @@ public class BazelWorkspace {
 
     public static boolean isServerBusy(CoreException e) {
         return e.getStatus() != null && e.getStatus().getCode() == STATUS_SERVER_BUSY;
+    }
+
+    public static boolean isFetchBlocked(CoreException e) {
+        return e.getStatus() != null && e.getStatus().getCode() == STATUS_FETCH_BLOCKED;
+    }
+
+    /*
+        Package-private and static so the classification is testable without a bazel process: the
+        markers are bazel's wording, and a bazel release renaming them would otherwise turn a
+        precise, actionable message back into "failed with exit code 1".
+     */
+    static boolean isFetchFailure(List<String> captured) {
+        synchronized (captured) {
+            for (String line : captured) {
+                for (String marker : FETCH_FAILURE_MARKERS) {
+                    if (line.contains(marker)) {
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
+    }
+
+    private static boolean isCause(String line) {
+        return line.startsWith(" ") || line.startsWith("\t") || line.startsWith("Error in ");
+    }
+
+    /*
+        The first error with its cause, plus the last one when bazel repeated itself further down -
+        which it does exactly in the interesting case, where the final ERROR line carries the remedy.
+     */
+    static String failureDetail(List<String> captured) {
+        String detail;
+        synchronized (captured) {
+            if (captured.isEmpty()) {
+                return "(no stderr)";
+            }
+            String first = captured.get(0);
+            String last = captured.get(captured.size() - 1);
+            detail = first.contains(last) || last.contains(first) || captured.size() == 1
+                    ? first
+                    : first + " | last: " + last;
+        }
+        return detail.length() <= MAX_DETAIL_CHARS
+                ? detail
+                : detail.substring(0, MAX_DETAIL_CHARS) + " ...";
     }
 
     private static IStatus busyError(String message) {
@@ -369,19 +481,22 @@ public class BazelWorkspace {
                 // what the developer's bazelrc does.
                 command.add("--curses=no");
                 command.add("--color=no");
-                if (CREATES_CONVENIENCE_SYMLINKS.contains(arg)) {
+                if (CREATES_CONVENIENCE_SYMLINKS.contains(arg)
+                        && current.hasDedicatedOutputBase()) {
                     /*
-                        The IDE's own builds must not plant the bazel-bin / bazel-out /
-                        bazel-testlogs symlinks in the repository root. jdt.ls follows symlinks
-                        during the very first workspace scan (UnifiedTree.isRecursiveLink), and that
-                        scan runs before java.project.resourceFilters is applied - configureFilters()
-                        only runs once initializeProjects() has returned - so no exclude setting can
-                        save an import that meets them: it descends into the whole action output
-                        tree and the import parks at "Initialize Workspace" indefinitely.
+                        Only with a dedicated output base, and only because there the default is
+                        actively wrong: measured on bazel 9.2.0, a build repoints every convenience
+                        symlink at the output base it ran in, so an IDE build would send bazel-bin
+                        at ~/.cache/bazel-ide, where nothing but the IDE's own classpath targets was
+                        ever built - and everything else in the repository that reads generated
+                        output through bazel-bin (TypeScript configs, scripts) would read an empty
+                        tree until the next terminal build put it back. "normal" can also delete a
+                        symlink it considers ambiguous; "ignore" neither creates nor removes.
 
-                        "ignore" neither creates nor removes them, so a developer whose terminal
-                        builds rely on bazel-bin keeps whatever is already there; this only stops the
-                        IDE from being the one that creates it. Verified present on bazel 9.2.0.
+                        On the shared output base - the default - the IDE writes the same paths a
+                        terminal build would, so there is nothing to protect against and no flag is
+                        added. Keeping the symlinks out of the jdt.ls scan is ImportExclusions' job,
+                        not bazel's.
                      */
                     command.add("--experimental_convenience_symlinks=ignore");
                 }
@@ -436,6 +551,8 @@ public class BazelWorkspace {
             try (BufferedReader reader = new BufferedReader(
                     new InputStreamReader(process.getErrorStream(), StandardCharsets.UTF_8))) {
                 String line;
+                int capturing = -1;
+                int causeLines = 0;
                 while ((line = reader.readLine()) != null) {
                     if (line.contains(BUSY_STDERR_MARKER)) {
                         // "Another command (pid=N) is running." - printed by the client both when
@@ -444,9 +561,25 @@ public class BazelWorkspace {
                         busyLine.compareAndSet(null, line.strip());
                     }
                     if (line.startsWith("ERROR") || line.startsWith("FATAL")) {
-                        if (captured.size() < MAX_CAPTURED_ERRORS) {
+                        capturing = captured.size() < MAX_CAPTURED_ERRORS ? captured.size() : -1;
+                        causeLines = 0;
+                        if (capturing >= 0) {
                             captured.add(line);
                         }
+                    } else if (capturing >= 0 && causeLines < MAX_CAUSE_LINES && isCause(line)) {
+                        /*
+                            bazel prints the actionable half of a failure *after* its ERROR line:
+                            the Starlark traceback, and the "Error in fail: ... please run: REPIN=1
+                            bazel run @maven//:pin" that says what to do about it. Capturing only
+                            lines that start with ERROR threw precisely that away, and the import
+                            report read "failed with exit code 1: ERROR: ...coursier.bzl:678:21: An
+                            error occurred during the fetch of repository 'maven_nullaway':" - a
+                            sentence that stops where the answer starts.
+                         */
+                        captured.set(capturing, captured.get(capturing) + " " + line.strip());
+                        causeLines++;
+                    } else {
+                        capturing = -1;
                     }
                 }
             } catch (IOException ignored) {

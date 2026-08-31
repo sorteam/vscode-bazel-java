@@ -1,5 +1,40 @@
 # Changelog
 
+## 0.6.0
+
+A correction. 0.4.0 and 0.5.0 told you to put `common --experimental_convenience_symlinks=ignore` in
+the bazelrc and delete the `bazel-*` symlinks from the repository root. That advice fixed the Java
+import by breaking everything else in a mixed repository: TypeScript configs, scripts and anything
+else that resolves generated output through `bazel-bin` lost the path they read from. It is withdrawn.
+
+- **The symlinks stay, and the scan is fenced off instead.** jdt.ls looks for build files by walking
+  the workspace with symlinks followed, and the same walk skips any directory whose path matches
+  `java.import.exclusions`. The extension now writes the bazel output paths into that list at the
+  start of every import attempt - including the attempts where it declines, which is exactly when
+  jdt.ls falls through to its own gradle/maven/eclipse detection - so nothing descends into the output
+  tree and nothing has to be deleted. `**/bazel-*/**` also ships as a `configurationDefaults` entry,
+  alongside jdt.ls's own four patterns, for the very first session.
+- **Symlinks are detected by where they point, not by their name.** `--symlink_prefix` renames all of
+  them, so a root symlink is recognised by landing inside the output base. They are reported in the
+  import report and in `JBazel: Doctor`, never as a fault: the doctor now only speaks up when
+  `java.import.exclusions` has been pinned to a list that does not cover them, and then prints the
+  exact patterns to add.
+- **`--experimental_convenience_symlinks=ignore` is no longer passed on every build.** It goes only to
+  builds that run in an IDE-owned output base (`bazelJava.outputBase`), where bazel would otherwise
+  repoint `bazel-bin` at a tree in which only the IDE's own classpath targets were ever built. On the
+  shared output base - the default - the IDE writes the same paths a terminal build does, so the flag
+  is not added at all.
+- **A bazel error keeps its cause.** Only lines starting with `ERROR` were captured, so a failure read
+  "An error occurred during the fetch of repository 'maven_nullaway':" and stopped there - one line
+  before the traceback where bazel prints the command that fixes it. The traceback and the trailing
+  `Error in fail:` line are captured with it now, and a repeated final error is included too.
+- **A failure that waits on a human says so.** An external repository that cannot be fetched - a
+  `rules_jvm_external` lock file needing a repin, most often - fails analysis outright, so no classpath
+  can be resolved and retrying changes nothing. It is classified apart from a transient failure: the
+  status bar says "bazel cannot fetch a repository", the report carries the remedy, and fixing it plus
+  a `MODULE.bazel` edit (or `JBazel: Refresh Classpath`) retries at once instead of counting
+  anonymous failures towards a five-minute backoff.
+
 ## 0.5.0
 
 Everything this extension contributes is now prefixed **JBazel**, so it no longer sits on top of the

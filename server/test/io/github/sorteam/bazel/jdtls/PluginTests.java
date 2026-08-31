@@ -42,8 +42,11 @@ public final class PluginTests {
         failureGateBusyWindowDoesNotEscalate();
         watchdogKillsASilentProcess();
         busyServerIsClassifiedAsBusyNotAsFailure();
-        ideBuildsRefuseToPlantConvenienceSymlinks();
+        theSymlinkFlagIsPassedOnlyForADedicatedOutputBase();
         convenienceSymlinksInTheRootAreReported();
+        exclusionPatternsFenceOffTheOutputTree();
+        bazelFailuresKeepTheirCauseAndAreClassified();
+        theGateSaysWhenAFailureNeedsAHuman();
         stampCoversSourceAttachmentsAndLombok();
         sourceLabelsAreFilteredOutOfTheRepositoryListing();
         doctorReadsTheBazelrcAndFindsHeavyDirectories();
@@ -507,38 +510,44 @@ public final class PluginTests {
     }
 
     /*
-        The regression: the IDE's own background build ran with bazel's default symlink behaviour and
-        so created bazel-bin / bazel-out in the repository root - which is the one thing that parks
-        the next jdt.ls workspace scan in the output tree. Only build and test take the flag; query
-        and aquery do not create symlinks and must not be given a build option.
+        The flag policy, reversed in 0.6.0. It used to go on every build and test the IDE ran, on the
+        theory that the convenience symlinks are a hazard - but they are what the rest of a monorepo
+        reads generated output through, and on the shared output base an IDE build writes exactly the
+        paths a terminal build would. What is left is the case where the IDE owns a separate output
+        base: measured on bazel 9.2.0, a build repoints every symlink at the base it ran in, so
+        without the flag bazel-bin would end up aimed at ~/.cache/bazel-ide.
      */
-    private static void ideBuildsRefuseToPlantConvenienceSymlinks() throws Exception {
+    private static void theSymlinkFlagIsPassedOnlyForADedicatedOutputBase() throws Exception {
         Path root = Files.createTempDirectory("bazel-symlink-flag");
         Path fake = root.resolve("fake-bazel.sh");
         Files.writeString(fake, "#!/bin/sh\nfor arg in \"$@\"; do echo \"$arg\"; done\n");
         fake.toFile().setExecutable(true);
 
+        String flag = "--experimental_convenience_symlinks=ignore";
         System.setProperty("bazel.binary", fake.toString());
         try {
-            BazelWorkspace workspace = new BazelWorkspace(root.toFile());
-            String flag = "--experimental_convenience_symlinks=ignore";
-
-            List<String> build = workspace.run(null, "build", "//...");
-            check("a build never creates the convenience symlinks", build.contains(flag),
+            BazelWorkspace shared = new BazelWorkspace(root.toFile());
+            List<String> build = shared.run(null, "build", "//...");
+            check("on the shared output base a build adds no symlink flag", !build.contains(flag),
                     build.toString());
-            check("the flag follows the command name, not the startup options",
-                    build.indexOf("build") < build.indexOf(flag), build.toString());
+            List<String> test = shared.run(null, "test", "//...");
+            check("nor does a test run", !test.contains(flag), test.toString());
 
-            List<String> test = workspace.run(null, "test", "//...");
-            check("neither does a test run", test.contains(flag), test.toString());
+            System.setProperty("bazel.outputBase", root.resolve("ide-base").toString());
+            BazelWorkspace dedicated = new BazelWorkspace(root.toFile());
+            List<String> ideBuild = dedicated.run(null, "build", "//...");
+            check("with an IDE-owned output base the flag is back", ideBuild.contains(flag),
+                    ideBuild.toString());
+            check("and it follows the command name, not the startup options",
+                    ideBuild.indexOf("build") < ideBuild.indexOf(flag), ideBuild.toString());
 
-            List<String> query = workspace.run(null, "query", "//...");
+            List<String> query = dedicated.run(null, "query", "//...");
             check("query gets no build option", !query.contains(flag), query.toString());
-
-            List<String> aquery = workspace.run(null, "aquery", "mnemonic(Javac, //...)");
+            List<String> aquery = dedicated.run(null, "aquery", "mnemonic(Javac, //...)");
             check("nor does aquery", !aquery.contains(flag), aquery.toString());
         } finally {
             System.clearProperty("bazel.binary");
+            System.clearProperty("bazel.outputBase");
         }
     }
 
@@ -553,12 +562,132 @@ public final class PluginTests {
         Files.createSymbolicLink(root.resolve("bazel-bin"), outputBase);
         /* The repository this was found on keeps a real bazel-lsp wrapper next to them. */
         Files.writeString(root.resolve("bazel-lsp"), "#!/bin/sh\n");
+        /*
+            --symlink_prefix renames all of them, so the name cannot be the test. What is stable is
+            where the link lands: inside the output base, which always has execroot in it.
+         */
+        Path execroot = Files.createDirectories(root.resolve("elsewhere/execroot/_main"));
+        Files.createSymbolicLink(root.resolve("out-main"), execroot);
+        /* An unrelated symlink to a directory of the developer's own must be left alone. */
+        Files.createSymbolicLink(root.resolve("data"),
+                Files.createDirectory(root.resolve("real-data")));
 
         List<String> found = workspace.convenienceSymlinks();
-        check("both symlinks reported, sorted", List.of("bazel-bin", "bazel-out").equals(found),
+        check("both bazel-prefixed symlinks reported, sorted",
+                found.indexOf("bazel-bin") == 0 && found.indexOf("bazel-out") == 1,
                 found.toString());
+        check("a symlink into the output tree counts whatever it is called",
+                found.contains("out-main"), found.toString());
         check("a real file named bazel-* is not a symlink and is left alone",
                 !found.contains("bazel-lsp"), found.toString());
+        check("an unrelated symlink is not ours to exclude", !found.contains("data"),
+                found.toString());
+    }
+
+    /*
+        The patterns that replace the retracted "delete the symlinks" advice. jdt.ls looks for build
+        files with Files.walkFileTree(root, FOLLOW_LINKS, ...) and skips a directory whose full path
+        matches one of java.import.exclusions, so the scan can be fenced off while the symlinks stay
+        exactly where the TypeScript side of the repository expects them.
+     */
+    private static void exclusionPatternsFenceOffTheOutputTree() throws Exception {
+        Path root = Files.createTempDirectory("bazel-exclusions");
+        Path outputBase = Files.createDirectory(root.resolve("output-base"));
+        String base = root.toFile().getAbsolutePath();
+
+        List<String> patterns = ImportExclusions.patterns(root.toFile(),
+                List.of("bazel-out", "out-main"), outputBase.toFile());
+        check("the standing pair covers symlinks created later",
+                patterns.contains(base + "/bazel-*") && patterns.contains(base + "/bazel-*/**"),
+                patterns.toString());
+        check("each symlink found is fenced off by its own path",
+                patterns.contains(base + "/out-main/**"), patterns.toString());
+        check("and so is the output base itself",
+                patterns.contains(outputBase.toFile().getAbsolutePath() + "/**"),
+                patterns.toString());
+
+        List<String> existing = new ArrayList<>(List.of("**/node_modules/**"));
+        List<String> merged = ImportExclusions.merge(existing, patterns);
+        check("merging keeps what jdt.ls already excludes",
+                merged != null && merged.get(0).equals("**/node_modules/**"), String.valueOf(merged));
+        check("and adds every pattern", merged.containsAll(patterns), String.valueOf(merged));
+        check("a second pass has nothing to add and writes nothing",
+                ImportExclusions.merge(merged, patterns) == null, "");
+        check("missing() is empty once the scan is fenced off",
+                ImportExclusions.missing(merged, patterns).isEmpty(),
+                ImportExclusions.missing(merged, patterns).toString());
+        check("and names exactly what is absent otherwise",
+                ImportExclusions.missing(List.of(), patterns).size() == patterns.size(), "");
+    }
+
+    /*
+        The report used to end where the answer began: only lines starting with ERROR were captured,
+        so "An error occurred during the fetch of repository 'maven_nullaway':" was logged without
+        the traceback that follows it - and the traceback is where bazel prints the command that
+        fixes it. A fetch failure is also classified apart from a generic one, because no amount of
+        retrying clears it.
+     */
+    private static void bazelFailuresKeepTheirCauseAndAreClassified() throws Exception {
+        Path root = Files.createTempDirectory("bazel-error-cause");
+        Path fake = root.resolve("fake-bazel.sh");
+        Files.writeString(fake, "#!/bin/sh\n"
+                + "echo \"ERROR: /x/coursier.bzl:678:21: An error occurred during the fetch of"
+                + " repository 'maven_nullaway':\" >&2\n"
+                + "echo \"   Traceback (most recent call last):\" >&2\n"
+                + "echo \"Error in fail: maven_nullaway_install.json contains an invalid input"
+                + " signature and must be regenerated. please run: REPIN=1 bazel run"
+                + " @maven_nullaway//:pin\" >&2\n"
+                + "exit 1\n");
+        fake.toFile().setExecutable(true);
+
+        System.setProperty("bazel.binary", fake.toString());
+        try {
+            BazelWorkspace workspace = new BazelWorkspace(root.toFile());
+            String message = "";
+            boolean blocked = false;
+            try {
+                workspace.run(null, "aquery", "mnemonic(Javac, //...)");
+            } catch (org.eclipse.core.runtime.CoreException e) {
+                message = String.valueOf(e.getMessage());
+                blocked = BazelWorkspace.isFetchBlocked(e);
+            }
+            check("the failure message carries the remedy bazel printed",
+                    message.contains("REPIN=1 bazel run @maven_nullaway//:pin"), message);
+            check("and the traceback line in between", message.contains("Traceback"), message);
+            check("an unfetchable repository is classified as needing a fix", blocked, message);
+        } finally {
+            System.clearProperty("bazel.binary");
+        }
+
+        check("a plain build failure is not classified as a fetch problem",
+                !BazelWorkspace.isFetchFailure(List.of("ERROR: BUILD:3:1 syntax error")), "");
+        check("the fetch markers are bazel's own wording",
+                BazelWorkspace.isFetchFailure(
+                        List.of("ERROR: An error occurred during the fetch of repository 'maven':")),
+                "");
+    }
+
+    /*
+        A stale lock file is not a transient failure, and "7 consecutive failure(s), retry in 52 s"
+        is the wrong thing to show for it: nothing happens until a human repins.
+     */
+    private static void theGateSaysWhenAFailureNeedsAHuman() throws Exception {
+        FailureGate gate = new FailureGate("classpath", 300);
+        gate.recordFailure("bazel aquery failed with exit code 1: ERROR: An error occurred during"
+                + " the fetch of repository 'maven_nullaway': Error in fail: ... REPIN=1 bazel run"
+                + " @maven_nullaway//:pin");
+        check("the gate knows this one waits on a person", gate.needsAFix(), gate.describe());
+        check("and says so instead of counting failures",
+                gate.describe().contains("needs a fix"), gate.describe());
+
+        FailureGate other = new FailureGate("discovery", 300);
+        other.recordFailure("bazel query failed with exit code 1: ERROR: BUILD:3:1 syntax error");
+        check("an ordinary failure still reads as a backoff", !other.needsAFix(), other.describe());
+        check("with the failure counter in the text",
+                other.describe().contains("consecutive failure(s)"), other.describe());
+
+        other.recordSuccess();
+        check("and recovery clears everything", other.describe().equals("ok"), other.describe());
     }
 
     /*
@@ -623,25 +752,26 @@ public final class PluginTests {
         Files.writeString(root.resolve(".bazelrc"), "build --jobs=8\n");
         facts.clear();
         List<String> problems = Doctor.bazelrcProblems(root.toFile(), facts);
-        check("a bazelrc without the symlink line is a problem", problems.size() == 1,
-                problems.toString());
+        /*
+            0.6.0 retracted the demand for --experimental_convenience_symlinks=ignore: the symlinks
+            are load-bearing for everything in the repository that is not java, and the scan they
+            used to break is fenced off with java.import.exclusions instead. A bazelrc without that
+            line must therefore report nothing.
+         */
+        check("a bazelrc is no longer faulted for keeping the convenience symlinks",
+                problems.isEmpty(), problems.toString());
         check("and --jobs being present is not suggested again",
                 facts.stream().noneMatch(fact -> fact.contains("--jobs below")), facts.toString());
 
-        Files.writeString(root.resolve(".bazelrc"),
-                "common --experimental_convenience_symlinks=ignore\n");
-        facts.clear();
-        check("with the line present there is nothing to report",
-                Doctor.bazelrcProblems(root.toFile(), facts).isEmpty(), "");
-
         /* Also picks up the aspect layer, which is where this repository keeps its personal rc. */
         Files.createDirectories(root.resolve(".aspect/bazelrc"));
-        Files.writeString(root.resolve(".bazelrc"), "build --jobs=8\n");
         Files.writeString(root.resolve(".aspect/bazelrc/user.bazelrc"),
-                "common --experimental_convenience_symlinks=ignore\n");
+                "common --disk_cache=~/.cache/bazel-disk\nstartup --max_idle_secs=600\n");
         facts.clear();
-        check("a line in .aspect/bazelrc counts",
-                Doctor.bazelrcProblems(root.toFile(), facts).isEmpty(), "");
+        Doctor.bazelrcProblems(root.toFile(), facts);
+        check("the disk cache suggestion is silenced by the aspect layer",
+                facts.stream().noneMatch(fact -> fact.contains("disk_cache=~/.cache/bazel-disk with")),
+                facts.toString());
         check("and that file is listed as read",
                 facts.toString().contains("user.bazelrc"), facts.toString());
 

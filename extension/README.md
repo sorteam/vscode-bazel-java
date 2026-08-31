@@ -12,18 +12,14 @@ Source folders are **linked**, never copied, and nothing is written into your wo
   (installed automatically as a dependency) - the importer runs inside its language server
 - `bazel` or `bazelisk` on `PATH`, or [`bazelJava.binary`](#settings) pointing at it
 - A repository with `MODULE.bazel`, `WORKSPACE.bazel`, `WORKSPACE` or `REPO.bazel` at its root
-- No `bazel-*` convenience symlinks in the repository root. Builds started by this extension do not
-  create them, but a plain `bazel build` in your terminal does unless the bazelrc says otherwise:
-
-  ```bash
-  common --experimental_convenience_symlinks=ignore
-  ```
-
-  This is not an optimisation. The language server follows symlinks during its first workspace scan,
-  and that scan runs before `java.project.resourceFilters` is applied, so a `bazel-out` symlink sends
-  it into the entire action output tree - millions of files - and the import never finishes. The same
-  goes for any other huge unignored directory, `node_modules` in particular. The status bar warns when
-  it finds such a symlink; delete them after adding the line.
+Nothing needs to be done about the `bazel-*` convenience symlinks in the repository root. Keep them:
+in a mixed repository they are how everything that is not java - TypeScript configs reading generated
+clients out of `bazel-bin`, scripts, `jq` one-liners - resolves generated output. The language server
+looks for build files by walking the workspace with symlinks followed, which is why an unfenced
+`bazel-out` used to park the import in the action output tree; since 0.6.0 the extension adds those
+paths to `java.import.exclusions` on every import instead, so the scan skips them and the symlinks
+stay. Other large directories still matter - `node_modules` in particular - and `JBazel: Doctor`
+reports them.
 
 ## Getting started
 
@@ -133,15 +129,11 @@ all; a background job then checks whether any `BUILD` file moved and re-imports 
 
 ## The bazelrc worth having
 
-One line is required; the rest are the difference between a monorepo that feels fine and one that
+None of these is required - they are the difference between a monorepo that feels fine and one that
 does not. Put them in a personal, gitignored bazelrc (`.bazelrc.user`, `~/.bazelrc`, or whatever
 layer your repository already uses).
 
 ```bash
-# REQUIRED. Without it, builds outside the IDE keep recreating bazel-bin / bazel-out in the
-# repository root, and the language server's first workspace scan follows them into the output tree.
-common --experimental_convenience_symlinks=ignore
-
 # Leave a couple of cores free, so a build does not starve the editor. bazelJava.buildJobs does the
 # same for the builds this extension starts on its own.
 build --jobs=8
@@ -195,11 +187,17 @@ the shared one belongs to you, not to the indexer.
 does, so a scope set before the first ever import is picked up on the next reload. Changing a setting
 afterwards offers to reimport straight away.
 
-**The import never finishes, or the status bar warns about symlinks in the repository root.** The
-`bazel-bin` / `bazel-out` / `bazel-testlogs` symlinks are being followed by the language server's
-first workspace scan. See [Requirements](#requirements): add
-`common --experimental_convenience_symlinks=ignore` to the bazelrc, delete the symlinks, and reload
-the window. Nothing here needs them - output paths come from `bazel info`.
+**The import never finishes.** Check `JBazel: Doctor` for a directory the first workspace scan has to
+walk. The `bazel-*` symlinks are excluded automatically; a pinned `java.import.exclusions` in your own
+settings replaces that list rather than extending it, and the doctor then prints the exact patterns to
+add back. Vendor directories inside the workspace (`node_modules`, `.venv`, `vendor`) are the other
+usual answer.
+
+**The status bar says bazel cannot fetch a repository.** Analysis cannot run, so no classpath can be
+resolved - typically a `rules_jvm_external` lock file that needs repinning after `MODULE.bazel`
+changed. The full bazel error, including the command it suggests, is in `JBazel: Show Import Report`.
+Fixing it and editing `MODULE.bazel` (or running `JBazel: Refresh Classpath`) retries at once, without
+waiting out a backoff.
 
 **Ctrl+Click into a library opens decompiled bytecode.** The source jars were never downloaded; that
 is the default state of a `rules_jvm_external` repository. Run `JBazel: Fetch Library Sources`, see

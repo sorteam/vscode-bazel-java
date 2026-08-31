@@ -1,5 +1,6 @@
 package io.github.sorteam.bazel.jdtls;
 
+import java.util.List;
 import java.util.concurrent.TimeUnit;
 
 /*
@@ -32,6 +33,7 @@ public final class FailureGate {
     private int consecutiveFailures;
     private long retryNotBefore;
     private boolean busyWaiting;
+    private boolean needsAFix;
     private String lastFailure = "";
 
     public FailureGate(String name, int maxDelaySeconds) {
@@ -65,6 +67,23 @@ public final class FailureGate {
         long delay = Math.min(maxDelaySeconds,
                 BASE_DELAY_SECONDS << Math.min(consecutiveFailures - 1, MAX_EXPONENT));
         retryNotBefore = System.nanoTime() + TimeUnit.SECONDS.toNanos(delay);
+
+        /*
+            An unfetchable external repository - a lock file that needs repinning, most often - is a
+            failure no amount of retrying can clear, and "7 consecutive failure(s), retry in 52 s"
+            told the developer nothing they could act on. It is called out separately, with whatever
+            remedy bazel printed (BazelWorkspace keeps the traceback now, which is where the
+            "REPIN=1 bazel run @maven//:pin" line lives).
+         */
+        needsAFix = BazelWorkspace.isFetchFailure(List.of(lastFailure));
+        if (needsAFix) {
+            BazelLog.warnOnce("gate-blocked:" + name, String.format(
+                    "JBazel: %s cannot run until bazel can fetch its external repositories, and"
+                            + " that will not clear on its own: %s. Fix it, then editing"
+                            + " MODULE.bazel or 'JBazel: Refresh Classpath' retries at once.",
+                    name, lastFailure));
+            return;
+        }
         BazelLog.warnOnce("gate:" + name, String.format(
                 "JBazel: %s failed (%s), backing off %d s; further identical failures are counted,"
                         + " not logged. Run 'JBazel: Refresh Classpath' to retry now.",
@@ -78,6 +97,7 @@ public final class FailureGate {
      */
     public synchronized void recordBusy(String reason) {
         busyWaiting = true;
+        needsAFix = false;
         lastFailure = reason == null ? "" : reason;
         retryNotBefore = System.nanoTime() + TimeUnit.SECONDS.toNanos(BUSY_RETRY_SECONDS);
         BazelLog.warnOnce("gate-busy:" + name, String.format(
@@ -90,6 +110,10 @@ public final class FailureGate {
         return busyWaiting && shouldSkip();
     }
 
+    public synchronized boolean needsAFix() {
+        return needsAFix;
+    }
+
     public synchronized void recordSuccess() {
         if (consecutiveFailures > 0) {
             BazelLog.info(String.format("JBazel: %s recovered after %d failed attempt(s)",
@@ -98,9 +122,11 @@ public final class FailureGate {
         consecutiveFailures = 0;
         retryNotBefore = 0;
         busyWaiting = false;
+        needsAFix = false;
         lastFailure = "";
         BazelLog.clear("gate:" + name);
         BazelLog.clear("gate-busy:" + name);
+        BazelLog.clear("gate-blocked:" + name);
     }
 
     /*
@@ -111,8 +137,10 @@ public final class FailureGate {
     public synchronized void reset() {
         retryNotBefore = 0;
         busyWaiting = false;
+        needsAFix = false;
         BazelLog.clear("gate:" + name);
         BazelLog.clear("gate-busy:" + name);
+        BazelLog.clear("gate-blocked:" + name);
     }
 
     public synchronized String describe() {
@@ -123,6 +151,10 @@ public final class FailureGate {
             return "ok";
         }
         long remaining = remainingSeconds();
+        if (needsAFix) {
+            return String.format("needs a fix - bazel cannot fetch an external repository"
+                    + " (retry in %d s once fixed): %s", remaining, lastFailure);
+        }
         return String.format("%d consecutive failure(s), retry in %d s, last: %s",
                 consecutiveFailures, remaining, lastFailure);
     }

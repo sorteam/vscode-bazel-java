@@ -141,6 +141,16 @@ public class BazelCommandHandler implements IDelegateCommandHandler {
             entry.put("classpathJars", session.getReport().getResolvedJars());
             entry.put("jarsWithSources", session.getReport().getJarsWithSources());
             entry.put("convenienceSymlinks", session.getWorkspace().convenienceSymlinks());
+            /*
+                A failure that retrying cannot clear - bazel cannot fetch an external repository -
+                gets its own status line, because "retry in 52 s" over and over is the wrong thing to
+                show for something waiting on a human.
+             */
+            entry.put("needsFix", session.getDiscoveryGate().needsAFix()
+                    || session.getClasspathGate().needsAFix());
+            entry.put("needsFixDetail", session.getClasspathGate().needsAFix()
+                    ? session.getClasspathGate().getLastFailure()
+                    : session.getDiscoveryGate().getLastFailure());
             status.put(session.getWorkspace().getRoot().getAbsolutePath(), entry);
         }
         return status;

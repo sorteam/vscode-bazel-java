@@ -9,6 +9,9 @@ import org.eclipse.core.runtime.OperationCanceledException;
 import org.eclipse.core.runtime.SubMonitor;
 import org.eclipse.jdt.core.IJavaProject;
 import org.eclipse.jdt.ls.core.internal.AbstractProjectImporter;
+import org.eclipse.jdt.ls.core.internal.JavaLanguageServerPlugin;
+import org.eclipse.jdt.ls.core.internal.preferences.PreferenceManager;
+import org.eclipse.jdt.ls.core.internal.preferences.Preferences;
 
 public class BazelProjectImporter extends AbstractProjectImporter {
 
@@ -37,6 +40,7 @@ public class BazelProjectImporter extends AbstractProjectImporter {
             return false;
         }
         session = BazelSession.forRoot(rootFolder);
+        excludeOutputTreesFromScans();
 
         /*
             The backoff window is enforced here rather than inside the import itself. jdt.ls asks the
@@ -122,28 +126,54 @@ public class BazelProjectImporter extends AbstractProjectImporter {
     }
 
     /*
-        A bazel-* convenience symlink in the repository root is the one misconfiguration that can
-        hang the whole language server rather than merely degrade it: jdt.ls follows symlinks in its
-        first workspace scan, and that scan runs before java.project.resourceFilters exists, so it
-        descends the entire action output tree - millions of files on a monorepo - and the import
-        never finishes. The IDE's own builds pass --experimental_convenience_symlinks=ignore, so
-        anything found here came from a build outside the IDE and only the repository's bazelrc can
-        stop it coming back.
+        Convenience symlinks in the root are no longer anybody's misconfiguration: the repository
+        needs them (a TypeScript config reading generated clients out of bazel-bin, for one), and
+        what has to happen is that jdt.ls stops walking into them. That is done here, before this
+        importer answers applies() - and therefore before the fallback importers, whose FOLLOW_LINKS
+        scan is the thing that hangs on them, ever run. See ImportExclusions.
+
+        Called from both exits of applies(): the dangerous case is precisely the one where this
+        importer declines - a backoff window or a failed discovery - because that is when jdt.ls
+        moves on to gradle, maven, eclipse and invisible-project detection.
+     */
+    private void excludeOutputTreesFromScans() {
+        PreferenceManager manager = JavaLanguageServerPlugin.getPreferencesManager();
+        Preferences preferences = manager == null ? null : manager.getPreferences();
+        if (preferences == null) {
+            return;
+        }
+        BazelWorkspace workspace = session.getWorkspace();
+        if (workspace.peekExecutionRoot() == null) {
+            String stored = session.getStore().peekExecutionRoot();
+            if (stored != null && !stored.isBlank()) {
+                workspace.setExecutionRoot(new File(stored));
+            }
+        }
+        List<String> symlinks = workspace.convenienceSymlinks();
+        List<String> merged = ImportExclusions.merge(preferences.getJavaImportExclusions(),
+                ImportExclusions.patterns(rootFolder, symlinks, workspace.peekOutputBase()));
+        if (merged == null) {
+            return;
+        }
+        preferences.setJavaImportExclusions(merged);
+        BazelLog.info(String.format(
+                "JBazel: excluded the bazel output tree from the language server's build-file scan"
+                        + " (%s); the symlinks themselves are left alone",
+                symlinks.isEmpty() ? "no symlinks in the root yet" : String.join(", ", symlinks)));
+    }
+
+    /*
+        Reported, not treated as a fault: the note exists so that "why is bazel-bin in my import
+        report" has an answer, and so the status bar can say the scan was fenced off rather than
+        asking anyone to delete anything.
      */
     private void warnAboutConvenienceSymlinks() {
         List<String> symlinks = session.getWorkspace().convenienceSymlinks();
         if (symlinks.isEmpty()) {
             return;
         }
-        session.getReport().note("convenience symlinks", String.join(", ", symlinks)
-                + " (add 'common --experimental_convenience_symlinks=ignore' to the bazelrc)");
-        BazelLog.warnOnce("convenience-symlinks:" + session.getWorkspace().getRoot(), String.format(
-                "JBazel: the repository root holds the convenience symlink(s) %s. jdt.ls follows"
-                        + " symlinks during its first workspace scan, before resource filters"
-                        + " apply, so these can park the import in the bazel output tree. Add"
-                        + " 'common --experimental_convenience_symlinks=ignore' to the bazelrc and"
-                        + " delete them.",
-                String.join(", ", symlinks)));
+        session.getReport().note("convenience symlinks",
+                String.join(", ", symlinks) + " (excluded from the java build-file scan)");
     }
 
     /*
