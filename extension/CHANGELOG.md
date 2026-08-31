@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.6.1
+
+Two fixes on top of 0.6.0, both from watching it run against a repository where one external
+repository cannot be fetched at all.
+
+- **One unfetchable external repository no longer empties every classpath.** `--keep_going` makes
+  bazel analyse what it can and exit non-zero for the rest, and the actions it did print are already
+  on stdout - measured: ten of eleven actions emitted, exit code 1. Those were discarded along with
+  the exception, so a single stale lock file left every project in the workspace without a classpath.
+  A batch that fails now keeps whatever it parsed, publishes those containers, and names the labels it
+  could not analyse in the import report. Only a batch that produced nothing at all is still a
+  failure, and it keeps the "bazel cannot fetch a repository" classification 0.6.0 added.
+- **A long bazel error keeps its tail.** The captured detail is capped, and the cap used to cut the
+  end - which is exactly where bazel prints the command that fixes the problem. It is elided in the
+  middle now, so both the failing rule and the remedy survive.
+- The rationale in the readme, the changelog and the code comments is stated in terms of bazel and the
+  language server rather than through any one repository's toolchain.
+
 ## 0.6.0
 
 A correction. 0.4.0 and 0.5.0 told you to put `common --experimental_convenience_symlinks=ignore` in
@@ -28,16 +46,7 @@ The advice is withdrawn.
 - **A bazel error keeps its cause.** Only lines starting with `ERROR` were captured, so a failure read
   "An error occurred during the fetch of repository 'maven_nullaway':" and stopped there - one line
   before the traceback where bazel prints the command that fixes it. The traceback and the trailing
-  `Error in fail:` line are captured with it now, a repeated final error is included too, and an
-  over-long detail is elided in the middle rather than at the end - bazel prints the remedy last, and
-  cutting the tail threw away the one line worth having.
-- **One unfetchable repository no longer empties every classpath.** `--keep_going` makes bazel analyse
-  what it can and exit non-zero for the rest, and the actions it did print are already on stdout -
-  measured against a repository with one broken external: ten of eleven actions emitted, exit code 1.
-  Those were thrown away with the exception, which is how a single stale lock file left every project
-  without a classpath. A batch that fails now keeps whatever it parsed, publishes those containers and
-  names the labels it could not analyse in the import report; only a batch that produced nothing at
-  all is still a failure.
+  `Error in fail:` line are captured with it now, and a repeated final error is included too.
 - **A failure that waits on a human says so.** An external repository that cannot be fetched - a
   `rules_jvm_external` lock file needing a repin, most often - fails analysis outright, so no classpath
   can be resolved and retrying changes nothing. It is classified apart from a transient failure: the
