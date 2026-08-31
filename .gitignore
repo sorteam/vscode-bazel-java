@@ -1,4 +1,6 @@
 .vscode
+.claude
+.mcp.json
 .DS_Store
 /out
 /dist
