@@ -12,6 +12,18 @@ Source folders are **linked**, never copied, and nothing is written into your wo
   (installed automatically as a dependency) - the importer runs inside its language server
 - `bazel` or `bazelisk` on `PATH`, or [`bazelJava.binary`](#settings) pointing at it
 - A repository with `MODULE.bazel`, `WORKSPACE.bazel`, `WORKSPACE` or `REPO.bazel` at its root
+- No `bazel-*` convenience symlinks in the repository root. Builds started by this extension do not
+  create them, but a plain `bazel build` in your terminal does unless the bazelrc says otherwise:
+
+  ```bash
+  common --experimental_convenience_symlinks=ignore
+  ```
+
+  This is not an optimisation. The language server follows symlinks during its first workspace scan,
+  and that scan runs before `java.project.resourceFilters` is applied, so a `bazel-out` symlink sends
+  it into the entire action output tree - millions of files - and the import never finishes. The same
+  goes for any other huge unignored directory, `node_modules` in particular. The status bar warns when
+  it finds such a symlink; delete them after adding the line.
 
 ## Getting started
 
@@ -125,6 +137,12 @@ the shared one belongs to you, not to the indexer.
 **Settings look ignored on the very first import.** The language server starts before this extension
 does, so a scope set before the first ever import is picked up on the next reload. Changing a setting
 afterwards offers to reimport straight away.
+
+**The import never finishes, or the status bar warns about symlinks in the repository root.** The
+`bazel-bin` / `bazel-out` / `bazel-testlogs` symlinks are being followed by the language server's
+first workspace scan. See [Requirements](#requirements): add
+`common --experimental_convenience_symlinks=ignore` to the bazelrc, delete the symlinks, and reload
+the window. Nothing here needs them - output paths come from `bazel info`.
 
 **Something is badly wrong with the java model.** `Java: Clean Java Language Server Workspace` is the
 repair. The reimport that follows is served by one bazel query.

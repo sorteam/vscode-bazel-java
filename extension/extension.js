@@ -115,7 +115,24 @@ function activate(context) {
       const backoff = entries.reduce((max, entry) => Math.max(max, entry.backoffSeconds || 0), 0);
       const missing = entries.reduce((sum, entry) => sum + (entry.missingJars || 0), 0);
       const busy = entries.some((entry) => entry.serverBusy);
-      if (busy) {
+      const symlinks = entries.flatMap((entry) => entry.convenienceSymlinks || []);
+      if (symlinks.length > 0) {
+        /*
+          First, ahead of every transient state: this one can hang the language server outright.
+          jdt.ls follows symlinks in its first workspace scan, and that scan runs before
+          java.project.resourceFilters is applied, so a bazel-out symlink sends it into the whole
+          action output tree with no setting able to stop it.
+        */
+        status.text = `$(alert) Bazel: ${symlinks.join(", ")} in the repository root`;
+        status.tooltip =
+          "These are bazel's convenience symlinks into the output base. jdt.ls follows symlinks " +
+          "during its first workspace scan, before resource filters apply, so they can park the " +
+          "Java import in the bazel output tree. Add\n\n" +
+          "  common --experimental_convenience_symlinks=ignore\n\n" +
+          "to the repository's bazelrc, then delete them. Builds started by this extension " +
+          "already pass that flag; these came from a build outside the IDE.";
+        status.show();
+      } else if (busy) {
         // Not an error: a terminal build holds the bazel server lock and the IDE is waiting it out.
         status.text = "$(watch) Bazel: waiting for another bazel command";
         status.tooltip =

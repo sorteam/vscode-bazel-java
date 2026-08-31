@@ -61,6 +61,13 @@ public class BazelWorkspace {
                 return thread;
             });
 
+    /*
+        The commands that write the bazel-* convenience symlinks. query and aquery do not, so they
+        are not given the flag - it is a build option, and only these two carry it for certain on
+        every supported bazel version.
+     */
+    private static final Set<String> CREATES_CONVENIENCE_SYMLINKS = Set.of("build", "test");
+
     private final File root;
     private final ReentrantLock commandLock = new ReentrantLock(true);
 
@@ -80,6 +87,30 @@ public class BazelWorkspace {
 
     public BazelSettings getSettings() {
         return settings;
+    }
+
+    /*
+        The bazel-* convenience symlinks present in the repository root, sorted, or an empty list.
+
+        Nothing this plugin does creates them any more, but a terminal build without
+        --experimental_convenience_symlinks=ignore in the repository's bazelrc does, and one of them
+        is enough to park the next jdt.ls workspace scan in the action output tree. They cannot be
+        removed from here - they are the developer's, and their own build put them there - so they
+        are reported instead, in the log, the import report and the status bar.
+     */
+    public List<String> convenienceSymlinks() {
+        File[] entries = root.listFiles();
+        if (entries == null) {
+            return List.of();
+        }
+        List<String> found = new ArrayList<>();
+        for (File entry : entries) {
+            if (entry.getName().startsWith("bazel-") && Files.isSymbolicLink(entry.toPath())) {
+                found.add(entry.getName());
+            }
+        }
+        Collections.sort(found);
+        return found;
     }
 
     public synchronized BazelSettings reloadSettings() {
@@ -338,6 +369,22 @@ public class BazelWorkspace {
                 // what the developer's bazelrc does.
                 command.add("--curses=no");
                 command.add("--color=no");
+                if (CREATES_CONVENIENCE_SYMLINKS.contains(arg)) {
+                    /*
+                        The IDE's own builds must not plant the bazel-bin / bazel-out /
+                        bazel-testlogs symlinks in the repository root. jdt.ls follows symlinks
+                        during the very first workspace scan (UnifiedTree.isRecursiveLink), and that
+                        scan runs before java.project.resourceFilters is applied - configureFilters()
+                        only runs once initializeProjects() has returned - so no exclude setting can
+                        save an import that meets them: it descends into the whole action output
+                        tree and the import parks at "Initialize Workspace" indefinitely.
+
+                        "ignore" neither creates nor removes them, so a developer whose terminal
+                        builds rely on bazel-bin keeps whatever is already there; this only stops the
+                        IDE from being the one that creates it. Verified present on bazel 9.2.0.
+                     */
+                    command.add("--experimental_convenience_symlinks=ignore");
+                }
                 first = false;
             }
         }

@@ -116,6 +116,7 @@ public class BazelCommandHandler implements IDelegateCommandHandler {
                     || session.getDiscoveryGate().isBusyWaiting()
                     || session.getClasspathGate().isBusyWaiting());
             entry.put("missingJars", session.getReport().getMissingJars());
+            entry.put("convenienceSymlinks", session.getWorkspace().convenienceSymlinks());
             status.put(session.getWorkspace().getRoot().getAbsolutePath(), entry);
         }
         return status;

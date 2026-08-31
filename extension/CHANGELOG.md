@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.0
 
 Hardening against the branch-switch stampede: the java process no longer hangs or spins for minutes
 after `git checkout`.
@@ -23,6 +23,13 @@ after `git checkout`.
   previously had jars keeps the cached jars, and the import report counts how often that happened.
 - The cache stamp is taken before discovery runs, so a second branch switch landing mid-refresh
   schedules another pass instead of silently marking stale data as current.
+- Builds started by the extension pass `--experimental_convenience_symlinks=ignore`, so the IDE no
+  longer creates the `bazel-bin` / `bazel-out` / `bazel-testlogs` symlinks in the repository root.
+  The language server follows symlinks during its first workspace scan, and that scan runs before
+  `java.project.resourceFilters` is applied, so one of those symlinks can park the Java import in the
+  bazel output tree with no setting able to prevent it. Symlinks left by a build outside the IDE are
+  now reported in the status bar, the import report and the log, with the bazelrc line that stops
+  them coming back.
 - The automatic background build defers while the bazel server is busy with someone else's command.
 
 ## 0.3.0

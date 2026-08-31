@@ -42,6 +42,8 @@ public final class PluginTests {
         failureGateBusyWindowDoesNotEscalate();
         watchdogKillsASilentProcess();
         busyServerIsClassifiedAsBusyNotAsFailure();
+        ideBuildsRefuseToPlantConvenienceSymlinks();
+        convenienceSymlinksInTheRootAreReported();
 
         System.out.printf("%d checks, %d failure(s)%n", checks, FAILURES.size());
         FAILURES.forEach(failure -> System.out.println("  FAIL " + failure));
@@ -498,6 +500,61 @@ public final class PluginTests {
         } finally {
             System.clearProperty("bazel.binary");
         }
+    }
+
+    /*
+        The regression: the IDE's own background build ran with bazel's default symlink behaviour and
+        so created bazel-bin / bazel-out in the repository root - which is the one thing that parks
+        the next jdt.ls workspace scan in the output tree. Only build and test take the flag; query
+        and aquery do not create symlinks and must not be given a build option.
+     */
+    private static void ideBuildsRefuseToPlantConvenienceSymlinks() throws Exception {
+        Path root = Files.createTempDirectory("bazel-symlink-flag");
+        Path fake = root.resolve("fake-bazel.sh");
+        Files.writeString(fake, "#!/bin/sh\nfor arg in \"$@\"; do echo \"$arg\"; done\n");
+        fake.toFile().setExecutable(true);
+
+        System.setProperty("bazel.binary", fake.toString());
+        try {
+            BazelWorkspace workspace = new BazelWorkspace(root.toFile());
+            String flag = "--experimental_convenience_symlinks=ignore";
+
+            List<String> build = workspace.run(null, "build", "//...");
+            check("a build never creates the convenience symlinks", build.contains(flag),
+                    build.toString());
+            check("the flag follows the command name, not the startup options",
+                    build.indexOf("build") < build.indexOf(flag), build.toString());
+
+            List<String> test = workspace.run(null, "test", "//...");
+            check("neither does a test run", test.contains(flag), test.toString());
+
+            List<String> query = workspace.run(null, "query", "//...");
+            check("query gets no build option", !query.contains(flag), query.toString());
+
+            List<String> aquery = workspace.run(null, "aquery", "mnemonic(Javac, //...)");
+            check("nor does aquery", !aquery.contains(flag), aquery.toString());
+        } finally {
+            System.clearProperty("bazel.binary");
+        }
+    }
+
+    private static void convenienceSymlinksInTheRootAreReported() throws Exception {
+        Path root = Files.createTempDirectory("bazel-symlink-detect");
+        BazelWorkspace workspace = new BazelWorkspace(root.toFile());
+        check("a clean root reports nothing", workspace.convenienceSymlinks().isEmpty(),
+                workspace.convenienceSymlinks().toString());
+
+        Path outputBase = Files.createDirectory(root.resolve("output-base"));
+        Files.createSymbolicLink(root.resolve("bazel-out"), outputBase);
+        Files.createSymbolicLink(root.resolve("bazel-bin"), outputBase);
+        /* The repository this was found on keeps a real bazel-lsp wrapper next to them. */
+        Files.writeString(root.resolve("bazel-lsp"), "#!/bin/sh\n");
+
+        List<String> found = workspace.convenienceSymlinks();
+        check("both symlinks reported, sorted", List.of("bazel-bin", "bazel-out").equals(found),
+                found.toString());
+        check("a real file named bazel-* is not a symlink and is left alone",
+                !found.contains("bazel-lsp"), found.toString());
     }
 
     /* ------------------------------------------------------------------ util */

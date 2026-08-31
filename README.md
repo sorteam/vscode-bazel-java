@@ -143,6 +143,19 @@ re-resolves every project, from re-indexing the whole repository.
 [BuildClasspathJob](server/src/io/github/sorteam/bazel/jdtls/BuildClasspathJob.java) additionally
 fingerprints the jars around its build so an up-to-date build does not even trigger a refresh.
 
+**The IDE never creates the bazel-* convenience symlinks.** `build` and `test` started from here
+carry `--experimental_convenience_symlinks=ignore`
+([BazelWorkspace.buildCommand](server/src/io/github/sorteam/bazel/jdtls/BazelWorkspace.java)). jdt.ls
+follows symlinks in its first workspace scan (`UnifiedTree.isRecursiveLink`), and that scan runs
+before `java.project.resourceFilters` exists - `configureFilters()` only runs once
+`initializeProjects()` has returned - so a `bazel-out` symlink descends the whole action output tree
+and no exclude setting can stop it: the import parks forever. `ignore` neither creates nor deletes,
+so a developer's own `bazel-bin` stays where their terminal builds put it. Symlinks found in the root
+are reported rather than removed - they are the developer's - via
+[BazelWorkspace.convenienceSymlinks](server/src/io/github/sorteam/bazel/jdtls/BazelWorkspace.java),
+the status bar and the import report. Only `build` and `test` take the flag; it is a build option and
+`query` has no business receiving one.
+
 **The command timeout covers a silent process.** `waitFor(timeout)` only runs after stdout hits EOF,
 and a bazel client waiting for the server lock writes nothing to stdout - so the timeout used to
 never fire in exactly the case it existed for, and a terminal build could hold a jdt.ls job thread

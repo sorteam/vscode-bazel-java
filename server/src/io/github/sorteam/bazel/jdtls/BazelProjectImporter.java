@@ -64,6 +64,7 @@ public class BazelProjectImporter extends AbstractProjectImporter {
         }
         SubMonitor progress = SubMonitor.convert(monitor, 100);
         ImportReport report = session.getReport();
+        warnAboutConvenienceSymlinks();
 
         long discoveryStarted = System.currentTimeMillis();
         List<BazelQuery.Target> targets;
@@ -124,6 +125,31 @@ public class BazelProjectImporter extends AbstractProjectImporter {
         Uses the cache written by the previous session when there is one, and refreshes it in the
         background. A cold repository still pays for one query; a restart pays nothing.
      */
+    /*
+        A bazel-* convenience symlink in the repository root is the one misconfiguration that can
+        hang the whole language server rather than merely degrade it: jdt.ls follows symlinks in its
+        first workspace scan, and that scan runs before java.project.resourceFilters exists, so it
+        descends the entire action output tree - millions of files on a monorepo - and the import
+        never finishes. The IDE's own builds pass --experimental_convenience_symlinks=ignore, so
+        anything found here came from a build outside the IDE and only the repository's bazelrc can
+        stop it coming back.
+     */
+    private void warnAboutConvenienceSymlinks() {
+        List<String> symlinks = session.getWorkspace().convenienceSymlinks();
+        if (symlinks.isEmpty()) {
+            return;
+        }
+        session.getReport().note("convenience symlinks", String.join(", ", symlinks)
+                + " (add 'common --experimental_convenience_symlinks=ignore' to the bazelrc)");
+        BazelLog.warnOnce("convenience-symlinks:" + session.getWorkspace().getRoot(), String.format(
+                "Bazel: the repository root holds the convenience symlink(s) %s. jdt.ls follows"
+                        + " symlinks during its first workspace scan, before resource filters"
+                        + " apply, so these can park the import in the bazel output tree. Add"
+                        + " 'common --experimental_convenience_symlinks=ignore' to the bazelrc and"
+                        + " delete them.",
+                String.join(", ", symlinks)));
+    }
+
     private List<BazelQuery.Target> discover(IProgressMonitor monitor) throws CoreException {
         List<BazelQuery.Target> cached = session.getStore().peekDiscovery();
         if (cached != null && !cached.isEmpty()) {
