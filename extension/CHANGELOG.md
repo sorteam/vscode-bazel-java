@@ -28,7 +28,16 @@ The advice is withdrawn.
 - **A bazel error keeps its cause.** Only lines starting with `ERROR` were captured, so a failure read
   "An error occurred during the fetch of repository 'maven_nullaway':" and stopped there - one line
   before the traceback where bazel prints the command that fixes it. The traceback and the trailing
-  `Error in fail:` line are captured with it now, and a repeated final error is included too.
+  `Error in fail:` line are captured with it now, a repeated final error is included too, and an
+  over-long detail is elided in the middle rather than at the end - bazel prints the remedy last, and
+  cutting the tail threw away the one line worth having.
+- **One unfetchable repository no longer empties every classpath.** `--keep_going` makes bazel analyse
+  what it can and exit non-zero for the rest, and the actions it did print are already on stdout -
+  measured against a repository with one broken external: ten of eleven actions emitted, exit code 1.
+  Those were thrown away with the exception, which is how a single stale lock file left every project
+  without a classpath. A batch that fails now keeps whatever it parsed, publishes those containers and
+  names the labels it could not analyse in the import report; only a batch that produced nothing at
+  all is still a failure.
 - **A failure that waits on a human says so.** An external repository that cannot be fetched - a
   `rules_jvm_external` lock file needing a repin, most often - fails analysis outright, so no classpath
   can be resolved and retrying changes nothing. It is classified apart from a transient failure: the

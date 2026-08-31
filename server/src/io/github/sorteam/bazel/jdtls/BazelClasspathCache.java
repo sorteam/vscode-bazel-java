@@ -135,6 +135,8 @@ public final class BazelClasspathCache {
 
         long started = System.currentTimeMillis();
         Map<String, List<String>> resolved = new LinkedHashMap<>();
+        CoreException failure = null;
+        int unanalysed = 0;
         for (int offset = 0; offset < pending.size(); offset += MAX_LABELS_PER_BATCH) {
             if (monitor != null && monitor.isCanceled()) {
                 break;
@@ -142,12 +144,49 @@ public final class BazelClasspathCache {
             List<String> chunk =
                     pending.subList(offset, Math.min(pending.size(), offset + MAX_LABELS_PER_BATCH));
             AqueryParser parser = new AqueryParser();
-            runAquery(monitor, parser, "mnemonic(\"Javac\", set(" + String.join(" ", chunk) + "))");
-            session.getReport().countBatch();
+            try {
+                runAquery(monitor, parser, "mnemonic(\"Javac\", set(" + String.join(" ", chunk)
+                        + "))");
+            } catch (CoreException e) {
+                /*
+                    A batch that fails is not a batch that produced nothing. --keep_going makes
+                    bazel analyse what it can and exit non-zero for the rest, and the actions it did
+                    print are already on stdout and through the parser - measured: one target whose
+                    external repository could not be fetched, ten of eleven actions still emitted,
+                    exit code 1. Throwing here discarded all ten, which is how a single unfetchable
+                    repository turned into 116 projects with no classpath at all.
+                 */
+                parser.finish();
+                failure = e;
+                unanalysed += Math.max(0, chunk.size() - parser.jarsByLabel().size());
+            }
+            if (!parser.jarsByLabel().isEmpty()) {
+                session.getReport().countBatch();
+            }
             resolved.putAll(parser.jarsByLabel());
             // A label with no Javac action (an empty java_library, say) must be remembered as empty
             // or every pass would query it again.
             chunk.forEach(label -> resolved.putIfAbsent(label, List.of()));
+        }
+
+        /*
+            Nothing analysed at all is a real failure and keeps its classification - the gate turns
+            it into "needs a fix" when bazel cannot fetch a repository. Anything less is partial:
+            the classpaths that resolved are published, and what did not is named rather than
+            silently empty.
+         */
+        if (failure != null) {
+            boolean nothingResolved = resolved.values().stream().allMatch(List::isEmpty);
+            if (nothingResolved) {
+                throw failure;
+            }
+            session.getReport().note("aquery partial", String.format(
+                    "%d label(s) could not be analysed, the rest resolved - %s",
+                    unanalysed, failure.getMessage()));
+            BazelLog.warnOnce("aquery-partial:" + session.getWorkspace().getRoot().getName(),
+                    String.format("JBazel: %d label(s) could not be analysed and keep their previous"
+                            + " classpath; the other targets resolved normally. %s",
+                            unanalysed, failure.getMessage()));
         }
 
         if (force) {

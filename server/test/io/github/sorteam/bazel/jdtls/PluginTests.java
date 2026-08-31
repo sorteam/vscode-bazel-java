@@ -659,6 +659,46 @@ public final class PluginTests {
             System.clearProperty("bazel.binary");
         }
 
+        /*
+            The output a command produced before it failed is the point. bazel run with --keep_going
+            analyses what it can, prints those actions, and exits non-zero for the rest; measured on
+            a repository with one unfetchable external: ten of eleven actions on stdout, exit 1. If
+            the sink does not see them, a single broken repository empties every classpath.
+         */
+        Path streaming = Files.createTempDirectory("bazel-partial");
+        Path partial = streaming.resolve("fake-bazel.sh");
+        Files.writeString(partial, "#!/bin/sh\n"
+                + "echo 'targets {'\n"
+                + "echo '  id: 1'\n"
+                + "echo \"ERROR: An error occurred during the fetch of repository 'maven':\" >&2\n"
+                + "exit 1\n");
+        partial.toFile().setExecutable(true);
+        System.setProperty("bazel.binary", partial.toString());
+        try {
+            BazelWorkspace workspace = new BazelWorkspace(streaming.toFile());
+            List<String> seen = new ArrayList<>();
+            boolean threw = false;
+            try {
+                workspace.runStreaming(null, seen::add, "aquery", "mnemonic(Javac, //...)");
+            } catch (org.eclipse.core.runtime.CoreException e) {
+                threw = true;
+            }
+            check("a failing command still reports its failure", threw, "");
+            check("but what it printed before failing reaches the sink", seen.size() == 2,
+                    seen.toString());
+        } finally {
+            System.clearProperty("bazel.binary");
+        }
+
+        /*
+            The remedy is the last thing bazel prints, so a detail longer than the cap keeps its tail.
+         */
+        String long1 = "ERROR: " + "x".repeat(2000) + " please run: REPIN=1 bazel run @maven//:pin";
+        String elided = BazelWorkspace.failureDetail(List.of(long1));
+        check("a long failure keeps the command at its end",
+                elided.contains("REPIN=1 bazel run @maven//:pin"), elided);
+        check("and still starts where bazel started", elided.startsWith("ERROR: xxx"), elided);
+
         check("a plain build failure is not classified as a fetch problem",
                 !BazelWorkspace.isFetchFailure(List.of("ERROR: BUILD:3:1 syntax error")), "");
         check("the fetch markers are bazel's own wording",

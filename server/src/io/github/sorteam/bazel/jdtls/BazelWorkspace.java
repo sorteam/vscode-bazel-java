@@ -443,9 +443,17 @@ public class BazelWorkspace {
                     ? first
                     : first + " | last: " + last;
         }
-        return detail.length() <= MAX_DETAIL_CHARS
-                ? detail
-                : detail.substring(0, MAX_DETAIL_CHARS) + " ...";
+        if (detail.length() <= MAX_DETAIL_CHARS) {
+            return detail;
+        }
+        /*
+            Elided in the middle, never at the end: bazel puts the remedy last ("please run: REPIN=1
+            bazel run @maven//:pin"), and a head-only cut threw away the one line the developer needs
+            - which is what the first version of this did.
+         */
+        int head = MAX_DETAIL_CHARS / 2;
+        int tail = MAX_DETAIL_CHARS - head;
+        return detail.substring(0, head) + " ... " + detail.substring(detail.length() - tail);
     }
 
     private static IStatus busyError(String message) {
