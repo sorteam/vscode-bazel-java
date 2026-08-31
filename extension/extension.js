@@ -19,6 +19,8 @@ const SETTINGS_KEYS = [
   "backoffMaxSeconds",
   "groupSourceRoots",
   "buildOnImport",
+  "buildJobs",
+  "mavenRepository",
 ];
 
 /*
@@ -90,9 +92,52 @@ async function showResult(result) {
 }
 
 function createOutputReport(context) {
-  const channel = vscode.window.createOutputChannel("Bazel Java");
+  const channel = vscode.window.createOutputChannel("JBazel");
   context.subscriptions.push(channel);
   return channel;
+}
+
+/*
+  The half of the doctor report the server cannot produce. jdt.ls does not hand its own java.*
+  configuration to a plugin in any stable way, and reading it through internal preference APIs would
+  break on the next redhat.java release - but from here it is one call.
+*/
+function settingsAdvice() {
+  const java = vscode.workspace.getConfiguration("java");
+  const lines = ["  java.* settings"];
+  const problems = [];
+
+  const maven = java.get("import.maven.enabled");
+  const gradle = java.get("import.gradle.enabled");
+  lines.push(`    import.maven.enabled  : ${maven}`);
+  lines.push(`    import.gradle.enabled : ${gradle}`);
+  if (maven || gradle) {
+    problems.push(
+      "The Maven or Gradle importer is enabled. Bazel owns dependency resolution here, and " +
+        "these importers adopt any stray pom.xml or build.gradle they find, then compete for the " +
+        "same folders as the generated projects. Set java.import.maven.enabled and " +
+        "java.import.gradle.enabled to false."
+    );
+  }
+
+  const vmargs = java.get("jdt.ls.vmargs") || "";
+  lines.push(`    jdt.ls.vmargs         : ${vmargs || "(default)"}`);
+  if (!/-Xmx/.test(vmargs)) {
+    lines.push(
+      "    note                  : no -Xmx set, so the language server runs on redhat.java's " +
+        "default. Compare it against the heap the doctor report above measured."
+    );
+  }
+  lines.push(`    autobuild.enabled     : ${java.get("autobuild.enabled")}`);
+
+  let out = lines.join("\n") + "\n";
+  if (problems.length > 0) {
+    out += "\n";
+    problems.forEach((problem, index) => {
+      out += `  ${index + 1}. ${problem}\n`;
+    });
+  }
+  return out;
 }
 
 function activate(context) {
@@ -100,7 +145,7 @@ function activate(context) {
   const channel = createOutputReport(context);
 
   const status = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
-  status.command = "bazelJava.showImportReport";
+  status.command = "jbazel.showImportReport";
   context.subscriptions.push(status);
 
   /*
@@ -110,7 +155,7 @@ function activate(context) {
   */
   async function refreshStatus() {
     try {
-      const state = await serverCommand("bazel.status");
+      const state = await serverCommand("jbazel.status");
       const entries = Object.values(state || {});
       const backoff = entries.reduce((max, entry) => Math.max(max, entry.backoffSeconds || 0), 0);
       const missing = entries.reduce((sum, entry) => sum + (entry.missingJars || 0), 0);
@@ -123,7 +168,7 @@ function activate(context) {
           java.project.resourceFilters is applied, so a bazel-out symlink sends it into the whole
           action output tree with no setting able to stop it.
         */
-        status.text = `$(alert) Bazel: ${symlinks.join(", ")} in the repository root`;
+        status.text = `$(alert) JBazel: ${symlinks.join(", ")} in the repository root`;
         status.tooltip =
           "These are bazel's convenience symlinks into the output base. jdt.ls follows symlinks " +
           "during its first workspace scan, before resource filters apply, so they can park the " +
@@ -134,42 +179,98 @@ function activate(context) {
         status.show();
       } else if (busy) {
         // Not an error: a terminal build holds the bazel server lock and the IDE is waiting it out.
-        status.text = "$(watch) Bazel: waiting for another bazel command";
+        status.text = "$(watch) JBazel: waiting for another bazel command";
         status.tooltip =
           "A bazel command outside the IDE (usually a terminal build) holds the server lock. " +
           'The classpath refreshes when it finishes. Setting bazelJava.outputBase to "ide" ' +
           "gives the IDE its own server so the two never queue behind each other.";
         status.show();
       } else if (backoff > 0) {
-        status.text = `$(warning) Bazel: retry in ${backoff}s`;
+        status.text = `$(warning) JBazel: retry in ${backoff}s`;
         status.tooltip = entries.map((entry) => entry.discovery).join("\n");
         status.show();
       } else if (missing > 0) {
-        status.text = `$(warning) Bazel: ${missing} jars not built`;
-        status.tooltip = "Run 'Bazel: Build Classpath' to produce them.";
+        status.text = `$(warning) JBazel: ${missing} jars not built`;
+        status.tooltip = "Run 'JBazel: Build Classpath' to produce them.";
         status.show();
       } else {
         status.hide();
       }
+      offerSourcesOnce(entries);
     } catch (error) {
       status.hide();
     }
   }
 
+  /*
+    Offered once per workspace and never again, whatever the answer. A repository where most jars
+    have no sources is the normal state, not a fault - rules_jvm_external simply never fetches them -
+    so this has to read as an offer a developer may decline forever, not as a warning to repeat every
+    thirty seconds.
+  */
+  async function offerSourcesOnce(entries) {
+    const jars = entries.reduce((sum, entry) => sum + (entry.classpathJars || 0), 0);
+    const withSources = entries.reduce((sum, entry) => sum + (entry.jarsWithSources || 0), 0);
+    if (jars < 20 || withSources * 2 >= jars) {
+      return;
+    }
+    const key = `sourcesOffered:${(vscode.workspace.workspaceFolders || [])
+      .map((folder) => folder.uri.fsPath)
+      .join("|")}`;
+    if (context.globalState.get(key)) {
+      return;
+    }
+    await context.globalState.update(key, true);
+    const choice = await vscode.window.showInformationMessage(
+      `Only ${withSources} of ${jars} library jars have sources attached, so navigating into a ` +
+        "library lands in decompiled bytecode. Fetch the source jars?",
+      "Fetch",
+      "Not now"
+    );
+    if (choice === "Fetch") {
+      await vscode.commands.executeCommand("jbazel.fetchLibrarySources");
+    }
+  }
+
   context.subscriptions.push(
-    vscode.commands.registerCommand("bazelJava.refreshClasspath", async () => {
+    vscode.commands.registerCommand("jbazel.refreshClasspath", async () => {
       syncSettings();
-      await showResult(await serverCommand("bazel.refreshClasspath"));
+      await showResult(await serverCommand("jbazel.refreshClasspath"));
       refreshStatus();
     }),
-    vscode.commands.registerCommand("bazelJava.showImportReport", async () => {
-      const report = await serverCommand("bazel.showImportReport");
+    vscode.commands.registerCommand("jbazel.showImportReport", async () => {
+      const report = await serverCommand("jbazel.showImportReport");
       channel.clear();
       channel.appendLine(String(report));
       channel.show(true);
     }),
-    vscode.commands.registerCommand("bazelJava.buildClasspath", async () => {
-      await showResult(await serverCommand("bazel.buildClasspath"));
+    vscode.commands.registerCommand("jbazel.buildClasspath", async () => {
+      await showResult(await serverCommand("jbazel.buildClasspath"));
+    }),
+    vscode.commands.registerCommand("jbazel.fetchLibrarySources", async () => {
+      /*
+        Confirmed rather than just started: this downloads one source jar per third-party artifact,
+        which is gigabytes on a large repository. It changes nothing about what compiles - only what
+        you see when you navigate into a dependency - so it is never worth doing behind someone's
+        back.
+      */
+      const choice = await vscode.window.showInformationMessage(
+        "Fetch source jars for every third-party artifact? Without them, navigating into a " +
+          "library lands in decompiled bytecode. Expect a large download (gigabytes on a big " +
+          "repository); the classpath updates by itself when it finishes.",
+        { modal: true },
+        "Fetch"
+      );
+      if (choice === "Fetch") {
+        await showResult(await serverCommand("jbazel.fetchLibrarySources"));
+      }
+    }),
+    vscode.commands.registerCommand("jbazel.doctor", async () => {
+      const report = await serverCommand("jbazel.doctor");
+      channel.clear();
+      channel.appendLine(String(report));
+      channel.appendLine(settingsAdvice());
+      channel.show(true);
     }),
     vscode.workspace.onDidChangeConfiguration(async (event) => {
       if (!event.affectsConfiguration("bazelJava")) {
@@ -179,12 +280,12 @@ function activate(context) {
         return;
       }
       const choice = await vscode.window.showInformationMessage(
-        "Bazel Java settings changed. Reimport the workspace now?",
+        "JBazel settings changed. Reimport the workspace now?",
         "Reimport",
         "Later"
       );
       if (choice === "Reimport") {
-        await serverCommand("bazel.refreshClasspath");
+        await serverCommand("jbazel.refreshClasspath");
       }
     })
   );
@@ -205,7 +306,7 @@ function activate(context) {
       }
       requested.add(document.uri.fsPath);
       try {
-        await serverCommand("bazel.importFile", document.uri.fsPath);
+        await serverCommand("jbazel.importFile", document.uri.fsPath);
       } catch (error) {
         // The server may not be up yet; the next file opened will try again.
         requested.delete(document.uri.fsPath);
@@ -231,7 +332,7 @@ function activate(context) {
     pending = setTimeout(async () => {
       pending = null;
       try {
-        await serverCommand("bazel.buildFilesChanged");
+        await serverCommand("jbazel.buildFilesChanged");
         refreshStatus();
       } catch (error) {
         // Server not ready; the next edit will retry.

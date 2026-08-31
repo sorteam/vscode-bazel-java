@@ -44,6 +44,10 @@ public final class PluginTests {
         busyServerIsClassifiedAsBusyNotAsFailure();
         ideBuildsRefuseToPlantConvenienceSymlinks();
         convenienceSymlinksInTheRootAreReported();
+        stampCoversSourceAttachmentsAndLombok();
+        sourceLabelsAreFilteredOutOfTheRepositoryListing();
+        doctorReadsTheBazelrcAndFindsHeavyDirectories();
+        settingsReadBuildJobsAndMavenRepository();
 
         System.out.printf("%d checks, %d failure(s)%n", checks, FAILURES.size());
         FAILURES.forEach(failure -> System.out.println("  FAIL " + failure));
@@ -555,6 +559,136 @@ public final class PluginTests {
                 found.toString());
         check("a real file named bazel-* is not a symlink and is left alone",
                 !found.contains("bazel-lsp"), found.toString());
+    }
+
+    /*
+        The regression this prevents: fetching source jars changes nothing about the classpath - same
+        jars, same order, same mtimes - so a stamp that ignored source attachments reported "nothing
+        changed", the containers were not republished, and the freshly downloaded sources stayed
+        invisible until the window was reloaded.
+     */
+    private static void stampCoversSourceAttachmentsAndLombok() throws Exception {
+        Path root = Files.createTempDirectory("bazel-stamp-sources");
+        Files.writeString(root.resolve("guava.jar"), "aa");
+
+        long before = ContainerStamp.of(root.toFile(), List.of("guava.jar"), List.of());
+        Files.writeString(root.resolve("guava-sources.jar"), "src");
+        long after = ContainerStamp.of(root.toFile(), List.of("guava.jar"), List.of());
+        check("a source jar appearing next to a jar changes the stamp", before != after, "");
+
+        Files.writeString(root.resolve("guava-sources.jar"), "more source");
+        check("and so does the source jar changing",
+                after != ContainerStamp.of(root.toFile(), List.of("guava.jar"), List.of()), "");
+
+        /* The stamp has to describe the file that goes on the classpath, lombok substitution and all. */
+        Files.writeString(root.resolve("header_lombok-1.18.30.jar"), "stub");
+        long headerOnly = ContainerStamp.of(root.toFile(),
+                List.of("header_lombok-1.18.30.jar"), List.of());
+        Files.writeString(root.resolve("lombok-1.18.30.jar"), "the real thing");
+        check("the full lombok jar appearing changes the stamp of the header entry",
+                headerOnly != ContainerStamp.of(root.toFile(),
+                        List.of("header_lombok-1.18.30.jar"), List.of()), "");
+        check("and that entry resolves to the full jar",
+                "lombok-1.18.30.jar".equals(BazelClasspathContainer
+                        .jarFile(root.toFile(), "header_lombok-1.18.30.jar").getName()),
+                BazelClasspathContainer.jarFile(root.toFile(), "header_lombok-1.18.30.jar")
+                        .getName());
+    }
+
+    private static void sourceLabelsAreFilteredOutOfTheRepositoryListing() {
+        List<String> output = List.of(
+                "@maven//:com_google_guava_guava",
+                "@maven//:com_google_guava_guava_sources",
+                "@maven//:org_postgresql_postgresql_sources",
+                "@maven//:com_google_guava_guava_sources",
+                "Loading: 0 packages loaded",
+                "WARNING: some package failed to load",
+                "");
+
+        List<String> labels = FetchSourcesJob.sourceLabels(output);
+        check("only the sources labels are kept, deduplicated",
+                List.of("@maven//:com_google_guava_guava_sources",
+                        "@maven//:org_postgresql_postgresql_sources").equals(labels),
+                labels.toString());
+    }
+
+    private static void doctorReadsTheBazelrcAndFindsHeavyDirectories() throws Exception {
+        Path root = Files.createTempDirectory("bazel-doctor");
+        List<String> facts = new java.util.ArrayList<>();
+        check("no bazelrc anywhere is not reported as a problem",
+                Doctor.bazelrcProblems(root.toFile(), facts).isEmpty(), "");
+        check("but the report says which files were read",
+                facts.toString().contains("none found"), facts.toString());
+
+        Files.writeString(root.resolve(".bazelrc"), "build --jobs=8\n");
+        facts.clear();
+        List<String> problems = Doctor.bazelrcProblems(root.toFile(), facts);
+        check("a bazelrc without the symlink line is a problem", problems.size() == 1,
+                problems.toString());
+        check("and --jobs being present is not suggested again",
+                facts.stream().noneMatch(fact -> fact.contains("--jobs below")), facts.toString());
+
+        Files.writeString(root.resolve(".bazelrc"),
+                "common --experimental_convenience_symlinks=ignore\n");
+        facts.clear();
+        check("with the line present there is nothing to report",
+                Doctor.bazelrcProblems(root.toFile(), facts).isEmpty(), "");
+
+        /* Also picks up the aspect layer, which is where this repository keeps its personal rc. */
+        Files.createDirectories(root.resolve(".aspect/bazelrc"));
+        Files.writeString(root.resolve(".bazelrc"), "build --jobs=8\n");
+        Files.writeString(root.resolve(".aspect/bazelrc/user.bazelrc"),
+                "common --experimental_convenience_symlinks=ignore\n");
+        facts.clear();
+        check("a line in .aspect/bazelrc counts",
+                Doctor.bazelrcProblems(root.toFile(), facts).isEmpty(), "");
+        check("and that file is listed as read",
+                facts.toString().contains("user.bazelrc"), facts.toString());
+
+        Path modules = Files.createDirectories(root.resolve("web/node_modules"));
+        for (int i = 0; i < 6; i++) {
+            Files.writeString(modules.resolve("file" + i + ".js"), "x");
+        }
+        /*
+            A source tree of the very same size must not be reported. Telling someone their
+            services/ directory is too big is advice they cannot act on, and it was the first thing
+            this check got wrong.
+         */
+        Path services = Files.createDirectories(root.resolve("services/ws-crm/src/main/java"));
+        for (int i = 0; i < 6; i++) {
+            Files.writeString(services.resolve("Type" + i + ".java"), "class X {}");
+        }
+
+        List<Path> heavy = Doctor.heavyDirectories(root, 5);
+        check("the vendor directory is found", heavy.size() == 1, heavy.toString());
+        check("and it is the vendor one, not the source tree",
+                heavy.get(0).endsWith("node_modules"), heavy.toString());
+
+        /* A symlink is never descended into: doing so is the mistake the whole report warns about. */
+        Files.createSymbolicLink(root.resolve("bazel-out"), modules);
+        check("symlinked trees are left to the symlink check",
+                Doctor.heavyDirectories(root, 5).size() == 1,
+                Doctor.heavyDirectories(root, 5).toString());
+    }
+
+    private static void settingsReadBuildJobsAndMavenRepository() throws Exception {
+        Path root = Files.createTempDirectory("bazel-jobs");
+        Files.createDirectories(root.resolve(".vscode"));
+
+        BazelSettings defaults = BazelSettings.load(root.toFile());
+        check("no --jobs argument unless asked for", defaults.buildJobsArgument().isEmpty(), "");
+        check("the maven repository defaults to the conventional name",
+                "maven".equals(defaults.getMavenRepository()), defaults.getMavenRepository());
+
+        Files.writeString(root.resolve(".vscode/bazel-java.json"),
+                "{\"buildJobs\": 4, \"mavenRepository\": \"maven_install\"}");
+        BazelSettings configured = BazelSettings.load(root.toFile());
+        check("buildJobs becomes a --jobs argument",
+                configured.buildJobsArgument().orElse("").equals("--jobs=4"),
+                configured.buildJobsArgument().toString());
+        check("the maven repository is read from the repository file",
+                "maven_install".equals(configured.getMavenRepository()),
+                configured.getMavenRepository());
     }
 
     /* ------------------------------------------------------------------ util */

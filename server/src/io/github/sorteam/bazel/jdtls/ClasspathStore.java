@@ -84,10 +84,10 @@ public final class ClasspathStore {
             readMisplaced(json.getAsJsonObject("misplaced"));
             readClasspath(json.getAsJsonObject("classpath"));
             BazelLog.info(String.format(
-                    "Bazel: loaded cached import for %s (%d targets, %d classpaths)",
+                    "JBazel: loaded cached import for %s (%d targets, %d classpaths)",
                     root.getName(), discovery.size(), jarsByLabel.size()));
         } catch (IOException | RuntimeException e) {
-            BazelLog.info("Bazel: ignoring unreadable classpath cache " + file + ": " + e);
+            BazelLog.info("JBazel: ignoring unreadable classpath cache " + file + ": " + e);
             jarsByLabel.clear();
             discovery.clear();
         }
@@ -210,7 +210,7 @@ public final class ClasspathStore {
         try {
             Files.deleteIfExists(file);
         } catch (IOException e) {
-            BazelLog.info("Bazel: could not delete " + file + ": " + e);
+            BazelLog.info("JBazel: could not delete " + file + ": " + e);
         }
     }
 
@@ -268,7 +268,7 @@ public final class ClasspathStore {
             Files.move(temporary, file, StandardCopyOption.REPLACE_EXISTING);
             dirty = false;
         } catch (IOException e) {
-            BazelLog.info("Bazel: could not write " + file + ": " + e);
+            BazelLog.info("JBazel: could not write " + file + ": " + e);
         }
     }
 

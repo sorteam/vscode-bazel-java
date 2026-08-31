@@ -36,7 +36,7 @@ public final class BazelBinary {
         synchronized (BazelBinary.class) {
             if (resolved == null) {
                 resolved = search();
-                BazelLog.info("Bazel: using binary " + resolved);
+                BazelLog.info("JBazel: using binary " + resolved);
             }
             return resolved;
         }

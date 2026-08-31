@@ -66,8 +66,8 @@ public final class FailureGate {
                 BASE_DELAY_SECONDS << Math.min(consecutiveFailures - 1, MAX_EXPONENT));
         retryNotBefore = System.nanoTime() + TimeUnit.SECONDS.toNanos(delay);
         BazelLog.warnOnce("gate:" + name, String.format(
-                "Bazel: %s failed (%s), backing off %d s; further identical failures are counted,"
-                        + " not logged. Run 'Bazel: Refresh Classpath' to retry now.",
+                "JBazel: %s failed (%s), backing off %d s; further identical failures are counted,"
+                        + " not logged. Run 'JBazel: Refresh Classpath' to retry now.",
                 name, lastFailure, delay));
     }
 
@@ -81,7 +81,7 @@ public final class FailureGate {
         lastFailure = reason == null ? "" : reason;
         retryNotBefore = System.nanoTime() + TimeUnit.SECONDS.toNanos(BUSY_RETRY_SECONDS);
         BazelLog.warnOnce("gate-busy:" + name, String.format(
-                "Bazel: %s is waiting for the bazel server (busy with another command, likely a"
+                "JBazel: %s is waiting for the bazel server (busy with another command, likely a"
                         + " terminal build); retrying every %d s until it frees up",
                 name, BUSY_RETRY_SECONDS));
     }
@@ -92,7 +92,7 @@ public final class FailureGate {
 
     public synchronized void recordSuccess() {
         if (consecutiveFailures > 0) {
-            BazelLog.info(String.format("Bazel: %s recovered after %d failed attempt(s)",
+            BazelLog.info(String.format("JBazel: %s recovered after %d failed attempt(s)",
                     name, consecutiveFailures));
         }
         consecutiveFailures = 0;

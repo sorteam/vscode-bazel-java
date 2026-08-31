@@ -201,6 +201,16 @@ log every 42 minutes and destroyed the rest of the server's history. See
 developer's terminal, and killing it would cancel their build. That is also why a dedicated
 `outputBase` is opt-in.
 
+## Naming
+
+Everything user-facing is prefixed **JBazel**: the command palette entries (`category` in the
+manifest), the VS Code command ids (`jbazel.*`), the jdt.ls delegate command ids, the status bar, the
+output channel and every log line. Two reasons, and the second is the load-bearing one: the official
+Bazel extension owns the `Bazel: ...` block in the palette, and jdt.ls delegate command ids live in
+one namespace shared by every bundle in the language server - `bazel.status` is exactly what a second
+bazel plugin would register. Settings keep the `bazelJava.` prefix: they collide with nothing (the
+official extension uses `bazel.*`), and renaming them would silently drop whatever users had set.
+
 ## Design notes
 
 **Source roots are derived from what files declare, not from the path.** Eclipse insists that a
@@ -225,6 +235,34 @@ JPA static metamodel (`Entity_`), whole openapi-generated APIs, anything written
 Types the project also has sources for still resolve from the source folder, which JDT reaches first.
 The matching `-gensrc.jar` is attached as that entry's source, so `Entity_` opens in generated source
 rather than a decompiled class.
+
+**Source jars are fetched by name, or not at all.** `rules_jvm_external` supports
+`fetch_sources = True`, but the source jars are inputs to no action, so a normal build never
+downloads them and `sourcesFor()` finds nothing on disk - which reads as "this extension cannot show
+sources". [FetchSourcesJob](server/src/io/github/sorteam/bazel/jdtls/FetchSourcesJob.java) lists the
+artifact repository and builds every label whose name contains `sources`. Matching on the name rather
+than the rule kind is deliberate: the target naming has changed between rules_jvm_external versions
+and between its bzlmod and WORKSPACE paths, while `sources` has stayed. The repository name is a
+setting (`bazelJava.mavenRepository`) because nothing else in the plugin needs to know it exists.
+
+**The container stamp covers source attachments.** Fetching sources changes no jar - same paths, same
+sizes, same mtimes - so a stamp over jars alone answers "nothing changed", nothing is republished, and
+the sources stay invisible until the window is reloaded. [ContainerStamp](server/src/io/github/sorteam/bazel/jdtls/ContainerStamp.java)
+therefore resolves each entry exactly as the container does, lombok substitution included, and mixes
+in the attachment it lands on. That substitution used to be missing from the stamp entirely.
+
+**The doctor measures the heap from the JVM, not from the setting.** Only a full window reload applies
+a changed `-Xmx`, so `java.jdt.ls.vmargs` and the heap the server is actually running with routinely
+disagree - and that disagreement is itself the answer to "I raised the heap and nothing happened".
+`Runtime.maxMemory()` cannot be wrong about it. The `java.*` half of the report comes from the
+extension instead, because reading jdt.ls preferences from inside a bundle means internal APIs that
+break on the next redhat.java release.
+
+**The doctor only measures vendor directories.** The first version flagged any large directory below
+the workspace root, which on a monorepo means `services/` - advice nobody can act on. What can be
+acted on is a `node_modules` inside the workspace: 4.4 GB and 151k files on the repository this was
+built for, walked by the same pre-filter scan that follows the bazel symlinks, and holding no java at
+all. The list of names is in [Doctor](server/src/io/github/sorteam/bazel/jdtls/Doctor.java).
 
 **Lombok gets the full jar, not the interface jar.** vscode-java enables lombok by finding a
 `lombok-<version>.jar` on the project classpath and loading that exact file with `-javaagent`. Bazel

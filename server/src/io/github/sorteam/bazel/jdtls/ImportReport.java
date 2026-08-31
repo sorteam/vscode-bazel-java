@@ -5,7 +5,7 @@ import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /*
-    Counters and phase timings for the last import, surfaced by the "Bazel: Show Import Report"
+    Counters and phase timings for the last import, surfaced by the "JJBazel: Show Import Report"
     command. The performance work was originally measured by grepping the jdt.ls log after the
     fact; this makes the same numbers available without that archaeology.
  */
@@ -19,6 +19,7 @@ public final class ImportReport {
     private final AtomicInteger cacheHits = new AtomicInteger();
     private final AtomicInteger missingJars = new AtomicInteger();
     private final AtomicInteger resolvedJars = new AtomicInteger();
+    private final AtomicInteger jarsWithSources = new AtomicInteger();
     private final AtomicInteger publishedContainers = new AtomicInteger();
     private final AtomicInteger unchangedContainers = new AtomicInteger();
     private final AtomicInteger keptStaleClasspaths = new AtomicInteger();
@@ -47,9 +48,10 @@ public final class ImportReport {
         cacheHits.incrementAndGet();
     }
 
-    public void countJars(int resolved, int missing) {
+    public void countJars(int resolved, int missing, int withSources) {
         resolvedJars.addAndGet(resolved);
         missingJars.addAndGet(missing);
+        jarsWithSources.addAndGet(withSources);
     }
 
     public void countContainerPublished() {
@@ -82,9 +84,27 @@ public final class ImportReport {
         return missingJars.get();
     }
 
+    public int getResolvedJars() {
+        return resolvedJars.get();
+    }
+
+    /*
+        Classpath entries that opened with real sources. The ratio against resolvedJars is the only
+        honest answer to "why does Ctrl+Click land in decompiled bytecode": rules_jvm_external never
+        fetches source jars on its own, so on an untouched repository this is close to zero for
+        everything except the repository's own targets.
+     */
+    public int getJarsWithSources() {
+        return jarsWithSources.get();
+    }
+
+    public int getProvisionedProjects() {
+        return provisionedProjects;
+    }
+
     public synchronized String render() {
         StringBuilder out = new StringBuilder();
-        out.append("Bazel import report\n");
+        out.append("JBazel import report\n");
         out.append("  targets discovered : ").append(discoveredTargets).append('\n');
         out.append("  projects           : ").append(provisionedProjects)
                 .append(" (pruned ").append(prunedProjects).append(")\n");
@@ -93,6 +113,12 @@ public final class ImportReport {
         out.append("  classpath cache hits: ").append(cacheHits.get()).append('\n');
         out.append("  classpath jars     : ").append(resolvedJars.get())
                 .append(" resolved, ").append(missingJars.get()).append(" missing on disk\n");
+        out.append("  source attachments : ").append(jarsWithSources.get())
+                .append(" of ").append(resolvedJars.get());
+        if (resolvedJars.get() > 0 && jarsWithSources.get() * 2 < resolvedJars.get()) {
+            out.append(" - run 'JBazel: Fetch Library Sources' for the rest");
+        }
+        out.append('\n');
         out.append("  containers         : ").append(publishedContainers.get())
                 .append(" published, ").append(unchangedContainers.get())
                 .append(" unchanged (kept, no reindex)\n");

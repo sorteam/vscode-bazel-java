@@ -294,7 +294,7 @@ public class BazelWorkspace {
             lastBusyNanos = System.nanoTime();
             String detail = busyLine.get() == null ? "exit code " + exitCode : busyLine.get();
             BazelLog.warnOnce("bazel-busy:" + root.getName(), String.format(
-                    "Bazel: the bazel server for %s is busy with another command (a terminal"
+                    "JBazel: the bazel server for %s is busy with another command (a terminal"
                             + " build?): %s", root.getName(), detail));
             throw new CoreException(busyError(
                     summarise(command) + " - the bazel server is busy: " + detail));
@@ -308,7 +308,7 @@ public class BazelWorkspace {
             // Partial success. The java targets are in the output; whatever failed to load is
             // reported once by the stderr pump and then suppressed.
             BazelLog.warnOnce(errorKey(capturedErrors), String.format(
-                    "Bazel: %s completed with loading-phase errors (exit 3), using partial results."
+                    "JBazel: %s completed with loading-phase errors (exit 3), using partial results."
                             + " First error: %s",
                     summarise(command), firstError(capturedErrors)));
             lastBusyNanos = 0;
@@ -422,9 +422,9 @@ public class BazelWorkspace {
                     .redirectErrorStream(true).start();
             process.getInputStream().readAllBytes();
             process.waitFor(30, TimeUnit.SECONDS);
-            BazelLog.info("Bazel: shut down the IDE-owned server for " + root);
+            BazelLog.info("JBazel: shut down the IDE-owned server for " + root);
         } catch (IOException e) {
-            BazelLog.info("Bazel: could not shut down the IDE-owned server: " + e);
+            BazelLog.info("JBazel: could not shut down the IDE-owned server: " + e);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
         }

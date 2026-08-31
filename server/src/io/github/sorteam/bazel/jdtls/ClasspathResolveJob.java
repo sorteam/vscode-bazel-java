@@ -130,7 +130,7 @@ public final class ClasspathResolveJob extends Job {
             }
             if (published + unchanged > 1) {
                 BazelLog.info(String.format(
-                        "Bazel: %d classpath container(s) published, %d unchanged (kept, no"
+                        "JBazel: %d classpath container(s) published, %d unchanged (kept, no"
                                 + " reindex)", published, unchanged));
             }
             session.getStore().setExecutionRoot(executionRoot.getAbsolutePath());
@@ -218,15 +218,15 @@ public final class ClasspathResolveJob extends Job {
             session.setPublishedContainerStamp(projectName, stamp);
             session.getReport().countContainerPublished();
             session.getReport().countJars(container.getResolvedCount(),
-                    container.getMissingCount());
+                    container.getMissingCount(), container.getSourceAttachmentCount());
             if (container.getMissingCount() > 0) {
                 BazelLog.warnOnce("missing-jars:" + session.getWorkspace().getRoot(), String.format(
-                        "Bazel: %d classpath jars do not exist on disk yet (for example in %s)."
-                                + " Run 'Bazel: Build Classpath' to produce them.",
+                        "JBazel: %d classpath jars do not exist on disk yet (for example in %s)."
+                                + " Run 'JBazel: Build Classpath' to produce them.",
                         container.getMissingCount(), request.javaProject().getProject().getName()));
             }
         } catch (CoreException e) {
-            BazelLog.exception("Bazel: failed to set the classpath container for "
+            BazelLog.exception("JBazel: failed to set the classpath container for "
                     + request.javaProject().getProject().getName(), e);
         }
         return true;

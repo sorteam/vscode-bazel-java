@@ -47,8 +47,8 @@ public class BazelProjectImporter extends AbstractProjectImporter {
          */
         if (session.getDiscoveryGate().shouldSkip()) {
             BazelLog.warnOnce("import-skipped:" + rootFolder, String.format(
-                    "Bazel: import is backing off for %d s after %d failure(s); "
-                            + "run 'Bazel: Refresh Classpath' to retry now",
+                    "JBazel: import is backing off for %d s after %d failure(s); "
+                            + "run 'JBazel: Refresh Classpath' to retry now",
                     session.getDiscoveryGate().remainingSeconds(),
                     session.getDiscoveryGate().getConsecutiveFailures()));
             return false;
@@ -84,7 +84,7 @@ public class BazelProjectImporter extends AbstractProjectImporter {
         long discoveryMillis = System.currentTimeMillis() - discoveryStarted;
         report.setDiscoveredTargets(targets.size());
         report.phase("discovery", discoveryMillis);
-        BazelLog.info(String.format("Bazel: %d java targets with sources in %d ms",
+        BazelLog.info(String.format("JBazel: %d java targets with sources in %d ms",
                 targets.size(), discoveryMillis));
 
         List<ProjectGrouping.ProjectSpec> specs = ProjectGrouping.group(targets,
@@ -100,13 +100,13 @@ public class BazelProjectImporter extends AbstractProjectImporter {
         report.setPrunedProjects(provisioner.getPruned());
         report.phase("provision", provisionMillis);
         BazelLog.info(String.format(
-                "Bazel: %d projects in %d ms (created %d, updated %d, unchanged %d, pruned %d;"
+                "JBazel: %d projects in %d ms (created %d, updated %d, unchanged %d, pruned %d;"
                         + " nothing written to the working copy)",
                 projects.size(), provisionMillis, provisioner.getCreated(),
                 provisioner.getUpdated(), provisioner.getUnchanged(), provisioner.getPruned()));
         if (provisioner.getRelocatedFiles() > 0) {
             BazelLog.info(String.format(
-                    "Bazel: %d source file(s) declare a package their directory does not match;"
+                    "JBazel: %d source file(s) declare a package their directory does not match;"
                             + " linked into the package they declare",
                     provisioner.getRelocatedFiles()));
         }
@@ -121,10 +121,6 @@ public class BazelProjectImporter extends AbstractProjectImporter {
         imported = !projects.isEmpty();
     }
 
-    /*
-        Uses the cache written by the previous session when there is one, and refreshes it in the
-        background. A cold repository still pays for one query; a restart pays nothing.
-     */
     /*
         A bazel-* convenience symlink in the repository root is the one misconfiguration that can
         hang the whole language server rather than merely degrade it: jdt.ls follows symlinks in its
@@ -142,7 +138,7 @@ public class BazelProjectImporter extends AbstractProjectImporter {
         session.getReport().note("convenience symlinks", String.join(", ", symlinks)
                 + " (add 'common --experimental_convenience_symlinks=ignore' to the bazelrc)");
         BazelLog.warnOnce("convenience-symlinks:" + session.getWorkspace().getRoot(), String.format(
-                "Bazel: the repository root holds the convenience symlink(s) %s. jdt.ls follows"
+                "JBazel: the repository root holds the convenience symlink(s) %s. jdt.ls follows"
                         + " symlinks during its first workspace scan, before resource filters"
                         + " apply, so these can park the import in the bazel output tree. Add"
                         + " 'common --experimental_convenience_symlinks=ignore' to the bazelrc and"
@@ -150,6 +146,10 @@ public class BazelProjectImporter extends AbstractProjectImporter {
                 String.join(", ", symlinks)));
     }
 
+    /*
+        Uses the cache written by the previous session when there is one, and refreshes it in the
+        background. A cold repository still pays for one query; a restart pays nothing.
+     */
     private List<BazelQuery.Target> discover(IProgressMonitor monitor) throws CoreException {
         List<BazelQuery.Target> cached = session.getStore().peekDiscovery();
         if (cached != null && !cached.isEmpty()) {
@@ -171,7 +171,7 @@ public class BazelProjectImporter extends AbstractProjectImporter {
             return specs;
         }
         BazelLog.info(String.format(
-                "Bazel: %d projects exceeds maxProjects=%d, importing the first %d."
+                "JBazel: %d projects exceeds maxProjects=%d, importing the first %d."
                         + " Narrow the import with the 'targets' setting or .bazelproject.",
                 specs.size(), max, max));
         session.getReport().note("capped", specs.size() + " -> " + max);

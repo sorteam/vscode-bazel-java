@@ -102,7 +102,7 @@ public class ProjectProvisioner {
                     try {
                         createOrOpen(spec, phase.split(1));
                     } catch (CoreException e) {
-                        BazelLog.exception("Bazel: failed to create " + spec.name(), e);
+                        BazelLog.exception("JBazel: failed to create " + spec.name(), e);
                     }
                 }
             }, workspace.getRoot(), IWorkspace.AVOID_UPDATE, progress.split(1));
@@ -119,7 +119,7 @@ public class ProjectProvisioner {
                             projects.add(configured);
                         }
                     } catch (CoreException e) {
-                        BazelLog.exception("Bazel: failed to provision " + spec.name(), e);
+                        BazelLog.exception("JBazel: failed to provision " + spec.name(), e);
                     }
                 }
             }, workspace.getRoot(), progress.split(1));
@@ -145,7 +145,7 @@ public class ProjectProvisioner {
             }
             return previous;
         } catch (CoreException e) {
-            BazelLog.info("Bazel: could not toggle auto-building: " + e.getMessage());
+            BazelLog.info("JBazel: could not toggle auto-building: " + e.getMessage());
             return enabled;
         }
     }
@@ -473,7 +473,7 @@ public class ProjectProvisioner {
         }
         if (pruned > 0) {
             BazelLog.info(String.format(
-                    "Bazel: removed %d project(s) that no longer match any target", pruned));
+                    "JBazel: removed %d project(s) that no longer match any target", pruned));
         }
         pruneOrphanDirectories();
     }
@@ -513,7 +513,7 @@ public class ProjectProvisioner {
         }
         if (removed > 0) {
             BazelLog.info(String.format(
-                    "Bazel: removed %d empty leftover directory(ies) from the language server "
+                    "JBazel: removed %d empty leftover directory(ies) from the language server "
                             + "workspace", removed));
         }
     }

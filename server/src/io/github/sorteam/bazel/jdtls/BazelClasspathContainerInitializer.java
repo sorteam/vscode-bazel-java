@@ -54,7 +54,8 @@ public class BazelClasspathContainerInitializer extends ClasspathContainerInitia
 
         JavaCore.setClasspathContainer(containerPath, new IJavaProject[] { javaProject },
                 new IClasspathContainer[] { container }, new NullProgressMonitor());
-        session.getReport().countJars(container.getResolvedCount(), container.getMissingCount());
+        session.getReport().countJars(container.getResolvedCount(), container.getMissingCount(),
+                container.getSourceAttachmentCount());
 
         if (complete && executionRoot != null) {
             // Seed the republish guard with what was just handed to JDT, so the next refresh can
@@ -118,6 +119,6 @@ public class BazelClasspathContainerInitializer extends ClasspathContainerInitia
 
     @Override
     public String getDescription(IPath containerPath, IJavaProject project) {
-        return "Bazel Dependencies";
+        return "JBazel Dependencies";
     }
 }

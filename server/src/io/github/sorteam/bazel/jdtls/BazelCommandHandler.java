@@ -19,12 +19,19 @@ import org.eclipse.jdt.ls.core.internal.IDelegateCommandHandler;
  */
 public class BazelCommandHandler implements IDelegateCommandHandler {
 
-    public static final String REFRESH = "bazel.refreshClasspath";
-    public static final String REPORT = "bazel.showImportReport";
-    public static final String BUILD_CLASSPATH = "bazel.buildClasspath";
-    public static final String IMPORT_FILE = "bazel.importFile";
-    public static final String STATUS = "bazel.status";
-    public static final String BUILD_FILES_CHANGED = "bazel.buildFilesChanged";
+    /*
+        The jbazel. prefix rather than bazel.: these ids live in one namespace shared by every jdt.ls
+        bundle in the language server, and "bazel" is exactly what another bazel extension would
+        reach for. The VS Code side is prefixed for the same reason - see the command titles.
+     */
+    public static final String REFRESH = "jbazel.refreshClasspath";
+    public static final String REPORT = "jbazel.showImportReport";
+    public static final String BUILD_CLASSPATH = "jbazel.buildClasspath";
+    public static final String FETCH_SOURCES = "jbazel.fetchLibrarySources";
+    public static final String DOCTOR = "jbazel.doctor";
+    public static final String IMPORT_FILE = "jbazel.importFile";
+    public static final String STATUS = "jbazel.status";
+    public static final String BUILD_FILES_CHANGED = "jbazel.buildFilesChanged";
 
     @Override
     public Object executeCommand(String commandId, List<Object> arguments,
@@ -36,6 +43,10 @@ public class BazelCommandHandler implements IDelegateCommandHandler {
                 return report();
             case BUILD_CLASSPATH:
                 return BuildClasspathJob.start(sessions());
+            case FETCH_SOURCES:
+                return FetchSourcesJob.start(sessions());
+            case DOCTOR:
+                return doctor();
             case IMPORT_FILE:
                 return LazyImport.forFile(stringArgument(arguments, 0), monitor);
             case STATUS:
@@ -74,6 +85,17 @@ public class BazelCommandHandler implements IDelegateCommandHandler {
             affected++;
         }
         return affected;
+    }
+
+    private static Object doctor() {
+        if (sessions().isEmpty()) {
+            return "No bazel workspace is imported.";
+        }
+        StringBuilder out = new StringBuilder("JBazel doctor\n\n");
+        for (BazelSession session : sessions()) {
+            out.append(Doctor.render(session));
+        }
+        return out.toString();
     }
 
     private static Object report() {
@@ -116,6 +138,8 @@ public class BazelCommandHandler implements IDelegateCommandHandler {
                     || session.getDiscoveryGate().isBusyWaiting()
                     || session.getClasspathGate().isBusyWaiting());
             entry.put("missingJars", session.getReport().getMissingJars());
+            entry.put("classpathJars", session.getReport().getResolvedJars());
+            entry.put("jarsWithSources", session.getReport().getJarsWithSources());
             entry.put("convenienceSymlinks", session.getWorkspace().convenienceSymlinks());
             status.put(session.getWorkspace().getRoot().getAbsolutePath(), entry);
         }

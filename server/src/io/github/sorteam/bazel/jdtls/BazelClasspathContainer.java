@@ -25,14 +25,16 @@ public class BazelClasspathContainer implements IClasspathContainer {
 
     private final IClasspathEntry[] entries;
     private final int missing;
+    private final int withSources;
 
-    private BazelClasspathContainer(List<IClasspathEntry> entries, int missing) {
+    private BazelClasspathContainer(List<IClasspathEntry> entries, int missing, int withSources) {
         this.entries = entries.toArray(IClasspathEntry[]::new);
         this.missing = missing;
+        this.withSources = withSources;
     }
 
     public static BazelClasspathContainer empty() {
-        return new BazelClasspathContainer(List.of(), 0);
+        return new BazelClasspathContainer(List.of(), 0, 0);
     }
 
     /*
@@ -46,24 +48,24 @@ public class BazelClasspathContainer implements IClasspathContainer {
         }
         List<IClasspathEntry> resolved = new ArrayList<>();
         Set<String> seen = new LinkedHashSet<>();
-        int missing = 0;
+        int[] counts = new int[2];
 
-        missing += add(resolved, seen, executionRoot, mainJars, NO_ATTRIBUTES);
-        missing += add(resolved, seen, executionRoot, testJars, TEST_ONLY);
-        return new BazelClasspathContainer(resolved, missing);
+        add(resolved, seen, executionRoot, mainJars, NO_ATTRIBUTES, counts);
+        add(resolved, seen, executionRoot, testJars, TEST_ONLY, counts);
+        return new BazelClasspathContainer(resolved, counts[0], counts[1]);
     }
 
-    private static int add(List<IClasspathEntry> resolved, Set<String> seen, File executionRoot,
-            Collection<String> jars, IClasspathAttribute[] attributes) {
+    /* counts[0] accumulates jars absent from disk, counts[1] those that got a source attachment. */
+    private static void add(List<IClasspathEntry> resolved, Set<String> seen, File executionRoot,
+            Collection<String> jars, IClasspathAttribute[] attributes, int[] counts) {
         if (jars == null) {
-            return 0;
+            return;
         }
-        int missing = 0;
         for (String jar : jars) {
             if (!seen.add(jar)) {
                 continue;
             }
-            File file = resolveJar(executionRoot, jar);
+            File file = jarFile(executionRoot, jar);
             if (!file.isFile()) {
                 /*
                     aquery reports the jars a Javac action would consume, not jars that exist. The
@@ -72,14 +74,18 @@ public class BazelClasspathContainer implements IClasspathContainer {
                     is what makes a fresh clone look like a project with no dependencies, so the
                     count is reported and surfaced by the import report.
                  */
-                missing++;
+                counts[0]++;
                 continue;
             }
             IPath jarPath = new Path(file.getAbsolutePath());
-            resolved.add(JavaCore.newLibraryEntry(jarPath, sourcesFor(file), null,
+            File sources = sourcesFor(file);
+            if (sources != null) {
+                counts[1]++;
+            }
+            resolved.add(JavaCore.newLibraryEntry(jarPath,
+                    sources == null ? null : new Path(sources.getAbsolutePath()), null,
                     null, attributes, false));
         }
-        return missing;
     }
 
     public int getResolvedCount() {
@@ -91,6 +97,16 @@ public class BazelClasspathContainer implements IClasspathContainer {
     }
 
     /*
+        How many resolved entries opened with real sources rather than decompiled bytecode. Low on
+        most repositories for a reason worth surfacing: rules_jvm_external fetches source jars
+        lazily, and since they are inputs to no action, nothing ever pulls them - even with
+        fetch_sources = True. That is what "JBazel: Fetch Library Sources" exists for.
+     */
+    public int getSourceAttachmentCount() {
+        return withSources;
+    }
+
+    /*
         vscode-java decides whether to enable lombok by looking for a lombok-<version>.jar on the
         project classpath and then loading that exact file with -javaagent. What bazel puts on the
         compile classpath is the interface jar, header_lombok-*.jar: it carries the name the search
@@ -98,8 +114,8 @@ public class BazelClasspathContainer implements IClasspathContainer {
         that one goes on the classpath instead. Only lombok is treated this way - preferring full
         jars everywhere would grow the index by hundreds of megabytes for no benefit.
      */
-    private static File resolveJar(File executionRoot, String jar) {
-        File file = new File(executionRoot, jar);
+    static File jarFile(File executionRoot, String jar) {
+        File file = jar.startsWith("/") ? new File(jar) : new File(executionRoot, jar);
         String name = file.getName();
         if (name.startsWith("header_lombok-") && name.endsWith(".jar")) {
             File full = new File(file.getParentFile(), name.substring("header_".length()));
@@ -110,13 +126,19 @@ public class BazelClasspathContainer implements IClasspathContainer {
         return file;
     }
 
-    private static IPath sourcesFor(File jar) {
+    /*
+        Package-private so that ContainerStamp can stamp exactly what lands in the container: the
+        source attachment is part of a container's content, so a source jar appearing next to a jar
+        that is otherwise untouched has to count as a change. Without that, sources downloaded after
+        the fact stay invisible until the window is reloaded.
+     */
+    static File sourcesFor(File jar) {
         String name = jar.getName();
         String base = name.startsWith("header_") ? name.substring("header_".length()) : name;
         base = base.substring(0, base.length() - ".jar".length());
         File candidate = new File(jar.getParentFile(), base + "-sources.jar");
         if (candidate.isFile()) {
-            return new Path(candidate.getAbsolutePath());
+            return candidate;
         }
         /*
             A target's own -class.jar has no sources jar; what it has is the -gensrc.jar the same
@@ -128,7 +150,7 @@ public class BazelClasspathContainer implements IClasspathContainer {
             File generated = new File(jar.getParentFile(),
                     base.substring(0, base.length() - "-class".length()) + "-gensrc.jar");
             if (generated.isFile()) {
-                return new Path(generated.getAbsolutePath());
+                return generated;
             }
         }
         return null;
@@ -141,7 +163,7 @@ public class BazelClasspathContainer implements IClasspathContainer {
 
     @Override
     public String getDescription() {
-        return "Bazel Dependencies";
+        return "JBazel Dependencies";
     }
 
     @Override

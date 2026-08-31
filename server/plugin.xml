@@ -18,12 +18,14 @@
    <extension
          point="org.eclipse.jdt.ls.core.delegateCommandHandler">
       <delegateCommandHandler class="io.github.sorteam.bazel.jdtls.BazelCommandHandler">
-         <command id="bazel.refreshClasspath"/>
-         <command id="bazel.showImportReport"/>
-         <command id="bazel.buildClasspath"/>
-         <command id="bazel.importFile"/>
-         <command id="bazel.status"/>
-         <command id="bazel.buildFilesChanged"/>
+         <command id="jbazel.refreshClasspath"/>
+         <command id="jbazel.showImportReport"/>
+         <command id="jbazel.buildClasspath"/>
+         <command id="jbazel.fetchLibrarySources"/>
+         <command id="jbazel.doctor"/>
+         <command id="jbazel.importFile"/>
+         <command id="jbazel.status"/>
+         <command id="jbazel.buildFilesChanged"/>
       </delegateCommandHandler>
    </extension>
 </plugin>

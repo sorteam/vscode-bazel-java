@@ -97,7 +97,7 @@ public final class BazelClasspathCache {
         List<String> jars = parser.jarsByLabel().getOrDefault(label, List.of());
 
         session.getReport().countSingle();
-        BazelLog.info(String.format("Bazel: %d classpath jars for %s in %d ms (single)",
+        BazelLog.info(String.format("JBazel: %d classpath jars for %s in %d ms (single)",
                 jars.size(), label, System.currentTimeMillis() - started));
 
         store(Map.of(label, jars), true);
@@ -155,7 +155,7 @@ public final class BazelClasspathCache {
             if (kept > 0) {
                 session.getReport().countKeptStale(kept);
                 BazelLog.warnOnce("kept-stale:" + session.getWorkspace().getRoot().getName(),
-                        String.format("Bazel: aquery returned no Javac action for %d label(s) that"
+                        String.format("JBazel: aquery returned no Javac action for %d label(s) that"
                                 + " previously had a classpath (partial loading after a branch"
                                 + " switch?); keeping the cached jars", kept));
             }
@@ -164,7 +164,7 @@ public final class BazelClasspathCache {
         long elapsed = System.currentTimeMillis() - started;
         long withJars = resolved.values().stream().filter(jars -> !jars.isEmpty()).count();
         BazelLog.info(String.format(
-                "Bazel: warmed %d labels in %d ms (batch, %d with a Javac action)",
+                "JBazel: warmed %d labels in %d ms (batch, %d with a Javac action)",
                 resolved.size(), elapsed, withJars));
         session.getReport().phase("classpath", elapsed);
         return resolved;

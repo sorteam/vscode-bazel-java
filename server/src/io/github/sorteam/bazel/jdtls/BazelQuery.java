@@ -64,9 +64,9 @@ public class BazelQuery {
             if (!targets.isEmpty()) {
                 return targets;
             }
-            BazelLog.info("Bazel: offline discovery found nothing, retrying with fetching enabled");
+            BazelLog.info("JBazel: offline discovery found nothing, retrying with fetching enabled");
         } catch (CoreException e) {
-            BazelLog.info("Bazel: offline discovery failed (" + e.getMessage()
+            BazelLog.info("JBazel: offline discovery failed (" + e.getMessage()
                     + "), retrying with fetching enabled");
         }
         return run(monitor, expression, false);

@@ -13,7 +13,11 @@ import java.util.Collection;
     whose classpath actually changed.
 
     Size and modification time are part of the stamp so that a jar rebuilt in place - same path, new
-    content - still counts as a change and gets republished and reindexed.
+    content - still counts as a change and gets republished and reindexed. So is the source
+    attachment each jar resolves to: it is part of what the container hands JDT, and source jars
+    downloaded after the fact ("JBazel: Fetch Library Sources") change nothing else about the
+    classpath. Leaving them out of the stamp is what would make freshly fetched sources invisible
+    until the next window reload.
  */
 final class ContainerStamp {
 
@@ -34,10 +38,22 @@ final class ContainerStamp {
     }
 
     private static long mixFile(long hash, File executionRoot, String jar) {
-        File file = jar.startsWith("/") ? new File(jar) : new File(executionRoot, jar);
+        /*
+            Resolved exactly as the container resolves it, lombok substitution included, so the
+            stamp describes the file that actually goes on the classpath rather than the one aquery
+            named.
+         */
+        File file = BazelClasspathContainer.jarFile(executionRoot, jar);
         hash = mix(hash, jar);
         hash = 31 * hash + file.lastModified();
         hash = 31 * hash + file.length();
+
+        File sources = BazelClasspathContainer.sourcesFor(file);
+        hash = mix(hash, sources == null ? "|no-sources|" : sources.getAbsolutePath());
+        if (sources != null) {
+            hash = 31 * hash + sources.lastModified();
+            hash = 31 * hash + sources.length();
+        }
         return hash;
     }
 

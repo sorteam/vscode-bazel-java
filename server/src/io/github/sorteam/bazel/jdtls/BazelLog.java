@@ -67,7 +67,7 @@ public final class BazelLog {
         AtomicInteger seen = SUPPRESSED.remove(key);
         if (seen != null && seen.get() > 1) {
             write(String.format(
-                    "Bazel: recovered after %d suppressed repeats of [%s]", seen.get() - 1, key));
+                    "JBazel: recovered after %d suppressed repeats of [%s]", seen.get() - 1, key));
         }
     }
 

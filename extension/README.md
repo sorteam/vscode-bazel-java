@@ -47,15 +47,38 @@ If the repository already has a `.bazelproject` (the IntelliJ Bazel plugin's pro
 
 ## Commands
 
+Everything this extension contributes is prefixed **JBazel**, so it stays clear of the official
+Bazel extension's own `Bazel: ...` commands in the palette.
+
 | Command | Effect |
 |---|---|
-| `Bazel: Refresh Classpath` | Drops every cache, clears the backoff window, reimports in the background |
-| `Bazel: Show Import Report` | Phase timings, project and jar counts, backoff state, current scope |
-| `Bazel: Build Classpath` | Runs `bazel build` over the imported targets so the jars on the classpath exist |
+| `JBazel: Refresh Classpath` | Drops every cache, clears the backoff window, reimports in the background |
+| `JBazel: Show Import Report` | Phase timings, project and jar counts, source attachments, backoff state, scope |
+| `JBazel: Build Classpath` | Runs `bazel build` over the imported targets so the jars on the classpath exist |
+| `JBazel: Fetch Library Sources` | Downloads the source jars of third-party artifacts, so navigating into a library shows real source |
+| `JBazel: Doctor` | One report on the things that make a repository slow, noisy or red, and the exact line to fix each |
 
-The status bar shows two things worth noticing: `Bazel: retry in Ns` when an import failed and is
-backing off, and `Bazel: N jars not built` when the classpath points at jars that do not exist on
-disk yet.
+The status bar shows what is worth noticing: `JBazel: retry in Ns` when an import failed and is
+backing off, `JBazel: N jars not built` when the classpath points at jars that do not exist on disk
+yet, and a warning about `bazel-*` symlinks in the repository root, which can hang the import
+outright.
+
+## Library sources and javadoc
+
+Out of the box, Ctrl+Click into a third-party type lands in decompiled bytecode: no parameter names,
+no javadoc, no comments. That is not a limitation of this extension but of how the dependencies are
+fetched - `rules_jvm_external` downloads source jars lazily, and since they are inputs to no build
+action, nothing ever pulls them. `fetch_sources = True` alone does not change that.
+
+Run **JBazel: Fetch Library Sources** once. It asks bazel for every sources artifact and builds them,
+then attaches each `-sources.jar` to its jar and republishes only the projects that actually gained
+sources. Expect a large download - a couple of gigabytes on a repository with ~840 artifacts - which
+is why it is a command you run and never something that happens by itself. Artifacts that publish no
+sources at all (18 of 840 on the repository this was measured against) stay as bytecode; a
+decompiler extension is a reasonable fallback for those.
+
+The import report counts the result, so `source attachments : 263 of 289` is the answer to "why does
+this one open as bytecode".
 
 ## Settings
 
@@ -73,7 +96,15 @@ disk yet.
 | `bazelJava.backoffMaxSeconds` | `300` | Ceiling of the exponential backoff after a failed import |
 | `bazelJava.outputBase` | `""` | `ide` gives the IDE its own bazel server; empty shares the one your terminal uses |
 | `bazelJava.maxIdleSeconds` | `900` | `--max_idle_secs` for the IDE-owned server |
+| `bazelJava.buildJobs` | `0` | `--jobs` for the builds this extension starts by itself. `0` is bazel's default, every core |
+| `bazelJava.mavenRepository` | `maven` | External repository holding the third-party artifacts, used to find source jars |
 | `bazelJava.binary` | `""` | Path to bazel/bazelisk; `PATH` is searched when empty |
+
+Two `java.*` defaults are set for you, and both are conflict avoidance rather than taste:
+`java.import.maven.enabled` and `java.import.gradle.enabled` are `false`, because bazel owns
+dependency resolution here and those importers otherwise adopt any stray `pom.xml` or
+`build.gradle` and compete for the same folders as the imported projects. Override them if your
+repository genuinely has a Maven build alongside bazel.
 
 `bazelJava.binary` and `bazelJava.outputBase` are machine-scoped: they name something that gets
 executed, so a repository cannot set them for you.
@@ -100,6 +131,32 @@ Two decisions are worth knowing about, because they are what makes a restart che
 **The import is cached on disk.** A restart is served from the cache and costs no bazel calls at
 all; a background job then checks whether any `BUILD` file moved and re-imports only if it did.
 
+## The bazelrc worth having
+
+One line is required; the rest are the difference between a monorepo that feels fine and one that
+does not. Put them in a personal, gitignored bazelrc (`.bazelrc.user`, `~/.bazelrc`, or whatever
+layer your repository already uses).
+
+```bash
+# REQUIRED. Without it, builds outside the IDE keep recreating bazel-bin / bazel-out in the
+# repository root, and the language server's first workspace scan follows them into the output tree.
+common --experimental_convenience_symlinks=ignore
+
+# Leave a couple of cores free, so a build does not starve the editor. bazelJava.buildJobs does the
+# same for the builds this extension starts on its own.
+build --jobs=8
+
+# Let an idle bazel server release its JVM heap instead of holding it next to the language server's.
+startup --max_idle_secs=600
+
+# A local cache with a ceiling, so a branch switch reuses outputs instead of rebuilding them.
+common --disk_cache=~/.cache/bazel-disk
+common --experimental_disk_cache_gc_max_size=50G
+```
+
+`JBazel: Doctor` checks all of these against what it can find, and prints the missing line rather
+than editing anything.
+
 ## Known limitations
 
 Honest list, because they decide whether this works on *your* repository:
@@ -119,11 +176,11 @@ Honest list, because they decide whether this works on *your* repository:
 
 **Everything is unresolved and the report shows jars missing on disk.** `aquery` reports the jars a
 build *would* consume, not jars that exist - on a fresh clone most of them have never been produced.
-Run `Bazel: Build Classpath`.
+Run `JBazel: Build Classpath`.
 
 **A field or method that `bazel build` accepts reads as undefined.** A jar produced before its inputs
 last changed is still on disk, and JDT indexes it happily. This is what `bazelJava.buildOnImport`
-exists for; it is on by default, and `Bazel: Build Classpath` forces it.
+exists for; it is on by default, and `JBazel: Build Classpath` forces it.
 
 **The IDE and my terminal block each other on the bazel server.** They share one server and one lock.
 Set `bazelJava.outputBase` to `ide` to give the IDE its own, at the cost of a second analysis cache
@@ -132,7 +189,7 @@ the shared one belongs to you, not to the indexer.
 
 **Import failed once and now nothing happens.** Failures back off exponentially, up to
 `backoffMaxSeconds`, and the status bar says how long is left. Editing any `BUILD`, `.bzl` or
-`MODULE.bazel` file clears the window, and so does `Bazel: Refresh Classpath`.
+`MODULE.bazel` file clears the window, and so does `JBazel: Refresh Classpath`.
 
 **Settings look ignored on the very first import.** The language server starts before this extension
 does, so a scope set before the first ever import is picked up on the next reload. Changing a setting
@@ -143,6 +200,15 @@ afterwards offers to reimport straight away.
 first workspace scan. See [Requirements](#requirements): add
 `common --experimental_convenience_symlinks=ignore` to the bazelrc, delete the symlinks, and reload
 the window. Nothing here needs them - output paths come from `bazel info`.
+
+**Ctrl+Click into a library opens decompiled bytecode.** The source jars were never downloaded; that
+is the default state of a `rules_jvm_external` repository. Run `JBazel: Fetch Library Sources`, see
+[Library sources and javadoc](#library-sources-and-javadoc).
+
+**Everything is slow, noisy or red and it is not obvious why.** Run `JBazel: Doctor`. It reports the
+symlinks in the repository root, vendor directories that dominate the first workspace scan, the heap
+the language server actually runs with against the number of projects, the source-attachment ratio,
+the `java.*` settings that fight the import, and which bazelrc lines are missing. It only reads.
 
 **Something is badly wrong with the java model.** `Java: Clean Java Language Server Workspace` is the
 repair. The reimport that follows is served by one bazel query.

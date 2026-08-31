@@ -78,7 +78,7 @@ public final class DiscoveryRefreshJob extends Job {
         if (GitState.operationInProgress(root)) {
             if (gitWaitStarted == 0) {
                 gitWaitStarted = System.nanoTime();
-                BazelLog.info("Bazel: a git operation is rewriting " + root.getName()
+                BazelLog.info("JBazel: a git operation is rewriting " + root.getName()
                         + ", waiting for it to finish before refreshing");
             }
             if (System.nanoTime() - gitWaitStarted < MAX_GIT_WAIT_NANOS) {
@@ -103,12 +103,12 @@ public final class DiscoveryRefreshJob extends Job {
         forced = false;
         String digestBefore = Digests.buildFilesDigest(root.toPath());
         if (!force && !session.getStore().isStale(session.getSettings(), digestBefore)) {
-            BazelLog.info(String.format("Bazel: cached import still valid (checked in %d ms)",
+            BazelLog.info(String.format("JBazel: cached import still valid (checked in %d ms)",
                     System.currentTimeMillis() - started));
             return Status.OK_STATUS;
         }
 
-        BazelLog.info("Bazel: build files changed since the cached import, refreshing");
+        BazelLog.info("JBazel: build files changed since the cached import, refreshing");
         try {
             List<BazelQuery.Target> targets = new BazelQuery(session.getWorkspace())
                     .javaTargets(monitor, session.getSettings().isDiscoveryNoFetch());
@@ -139,14 +139,14 @@ public final class DiscoveryRefreshJob extends Job {
             String digestAfter = Digests.buildFilesDigest(root.toPath());
             if (digestBefore.isEmpty() || !digestBefore.equals(digestAfter)) {
                 session.getStore().save();
-                BazelLog.info("Bazel: build files changed while refreshing, scheduling another pass");
+                BazelLog.info("JBazel: build files changed while refreshing, scheduling another pass");
                 forced = true;
                 schedule(2000);
             } else {
                 session.getStore().stamp(session.getSettings(), digestBefore);
                 session.getStore().save();
             }
-            BazelLog.info(String.format("Bazel: refreshed %d project(s) in %d ms",
+            BazelLog.info(String.format("JBazel: refreshed %d project(s) in %d ms",
                     projects.size(), System.currentTimeMillis() - started));
         } catch (CoreException e) {
             if (BazelWorkspace.isServerBusy(e)) {

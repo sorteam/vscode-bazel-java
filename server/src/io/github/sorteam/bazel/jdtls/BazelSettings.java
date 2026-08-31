@@ -7,6 +7,7 @@ import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Optional;
 import java.util.Set;
 
 import com.google.gson.JsonElement;
@@ -60,6 +61,8 @@ public final class BazelSettings {
     private int backoffMaxSeconds = 300;
     private boolean groupSourceRoots = true;
     private String buildOnImport = BUILD_ON_IMPORT_BACKGROUND;
+    private int buildJobs = 0;
+    private String mavenRepository = "maven";
 
     private BazelSettings(File root) {
         this.root = root;
@@ -155,6 +158,30 @@ public final class BazelSettings {
         return BUILD_ON_IMPORT_BACKGROUND.equals(buildOnImport);
     }
 
+    /*
+        --jobs for the builds this plugin starts, as an argument or empty when unset.
+
+        The default is bazel's own, which is every core: right for a build the developer is waiting
+        on, wrong for one the indexer started behind their back - it starves the editor and the
+        language server on the machine they are typing on. Left unset rather than guessed at, since
+        the right number depends on the machine and on what else the repository's bazelrc says.
+     */
+    public Optional<String> buildJobsArgument() {
+        return buildJobs > 0 ? Optional.of("--jobs=" + buildJobs) : Optional.empty();
+    }
+
+    public int getBuildJobs() {
+        return buildJobs;
+    }
+
+    /*
+        The external repository holding the third-party artifacts, "maven" by convention. Only used
+        to find source jars to fetch; nothing else in the plugin needs to know it exists.
+     */
+    public String getMavenRepository() {
+        return mavenRepository;
+    }
+
     public List<String> getIncludedPatterns() {
         return includedPatterns;
     }
@@ -213,7 +240,7 @@ public final class BazelSettings {
             json = JsonParser.parseString(Files.readString(file.toPath(), StandardCharsets.UTF_8))
                     .getAsJsonObject();
         } catch (IOException | RuntimeException e) {
-            BazelLog.warnOnce("settings:" + file, "Bazel: cannot read " + file + ": " + e);
+            BazelLog.warnOnce("settings:" + file, "JBazel: cannot read " + file + ": " + e);
             return;
         }
         if (machineLevel) {
@@ -223,7 +250,7 @@ public final class BazelSettings {
             for (String key : MACHINE_LEVEL_KEYS) {
                 if (json.has(key)) {
                     BazelLog.warnOnce("settings-ignored:" + file + ":" + key, String.format(
-                            "Bazel: ignoring '%s' from %s - it names something to execute, so it is"
+                            "JBazel: ignoring '%s' from %s - it names something to execute, so it is"
                                     + " only read from VS Code settings, not from the repository.",
                             key, file));
                 }
@@ -241,6 +268,8 @@ public final class BazelSettings {
         backoffMaxSeconds = integer(json, "backoffMaxSeconds", backoffMaxSeconds);
         groupSourceRoots = bool(json, "groupSourceRoots", groupSourceRoots);
         buildOnImport = string(json, "buildOnImport", buildOnImport);
+        buildJobs = integer(json, "buildJobs", buildJobs);
+        mavenRepository = string(json, "mavenRepository", mavenRepository);
     }
 
     /*
@@ -255,7 +284,7 @@ public final class BazelSettings {
         try {
             lines = Files.readAllLines(file.toPath(), StandardCharsets.UTF_8);
         } catch (IOException e) {
-            BazelLog.warnOnce("bazelproject:" + file, "Bazel: cannot read " + file + ": " + e);
+            BazelLog.warnOnce("bazelproject:" + file, "JBazel: cannot read " + file + ": " + e);
             return;
         }
 
@@ -321,6 +350,8 @@ public final class BazelSettings {
         noblockForLock = bool(override("noblockForLock", null), noblockForLock);
         groupSourceRoots = bool(override("groupSourceRoots", null), groupSourceRoots);
         buildOnImport = override("buildOnImport", buildOnImport);
+        buildJobs = integer(override("buildJobs", null), buildJobs);
+        mavenRepository = override("mavenRepository", mavenRepository);
 
         String targets = override("targets", null);
         if (targets != null && !targets.isBlank()) {

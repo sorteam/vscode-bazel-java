@@ -1,5 +1,37 @@
 # Changelog
 
+## 0.5.0
+
+Everything this extension contributes is now prefixed **JBazel**, so it no longer sits on top of the
+official Bazel extension in the command palette. Plus the two features the manual setup this replaces
+had and this did not: library sources, and a report on the configuration that makes a repository slow.
+
+- **Commands renamed.** `JBazel: Refresh Classpath`, `JBazel: Show Import Report`,
+  `JBazel: Build Classpath`. Their ids changed from `bazelJava.*` to `jbazel.*`, along with the
+  language-server command ids behind them - if you bound a key to one of the old ids, rebind it.
+  Settings keep the `bazelJava.` prefix, so no configuration needs changing.
+- **New: `JBazel: Fetch Library Sources`.** Downloads the source jars of every third-party artifact
+  and attaches them, so navigating into a library shows real source instead of decompiled bytecode.
+  `rules_jvm_external` never fetches them on its own - they are inputs to no action, so
+  `fetch_sources = True` alone changes nothing. Offered once when most jars turn out to have no
+  sources; otherwise it only ever runs when asked. The import report now counts source attachments.
+- **New: `JBazel: Doctor`.** One read-only report on what makes a repository slow, noisy or red:
+  convenience symlinks in the root, vendor directories that dominate the first workspace scan, the
+  heap the language server actually runs with against the number of projects, the source-attachment
+  ratio, the `java.*` settings that fight the import, and the missing bazelrc lines - each with the
+  line to add.
+- Classpath containers now stamp each jar's source attachment as well as the jar, so sources that
+  appear after the fact are picked up without reloading the window. The stamp also follows the lombok
+  full-jar substitution, which it previously ignored.
+- `java.import.maven.enabled` and `java.import.gradle.enabled` now default to `false`. Bazel owns
+  dependency resolution here, and those importers otherwise adopt stray `pom.xml` / `build.gradle`
+  files and compete for the same folders as the imported projects.
+- New `bazelJava.buildJobs`, so the build this extension starts in the background does not have to
+  take every core on the machine you are typing on. New `bazelJava.mavenRepository` for repositories
+  whose artifacts do not live in `@maven`.
+- The marketplace page documents the bazelrc worth having, and the log messages are prefixed
+  `JBazel:` so they can be told apart from anything else in the language server's log.
+
 ## 0.4.0
 
 Hardening against the branch-switch stampede: the java process no longer hangs or spins for minutes

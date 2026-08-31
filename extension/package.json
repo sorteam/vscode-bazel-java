@@ -2,7 +2,7 @@
   "name": "vscode-bazel-java",
   "displayName": "Bazel Java Project Importer",
   "description": "Imports Bazel java targets into the Java Language Server using bazel aquery",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "publisher": "belfegor",
   "license": "MIT",
   "icon": "icon.png",
@@ -58,19 +58,29 @@
     ],
     "commands": [
       {
-        "command": "bazelJava.refreshClasspath",
-        "title": "Bazel: Refresh Classpath",
-        "category": "Bazel Java"
+        "command": "jbazel.refreshClasspath",
+        "title": "Refresh Classpath",
+        "category": "JBazel"
       },
       {
-        "command": "bazelJava.showImportReport",
-        "title": "Bazel: Show Import Report",
-        "category": "Bazel Java"
+        "command": "jbazel.showImportReport",
+        "title": "Show Import Report",
+        "category": "JBazel"
       },
       {
-        "command": "bazelJava.buildClasspath",
-        "title": "Bazel: Build Classpath",
-        "category": "Bazel Java"
+        "command": "jbazel.buildClasspath",
+        "title": "Build Classpath",
+        "category": "JBazel"
+      },
+      {
+        "command": "jbazel.fetchLibrarySources",
+        "title": "Fetch Library Sources",
+        "category": "JBazel"
+      },
+      {
+        "command": "jbazel.doctor",
+        "title": "Doctor",
+        "category": "JBazel"
       }
     ],
     "configuration": {
@@ -129,7 +139,7 @@
             "off"
           ],
           "default": "background",
-          "markdownDescription": "`aquery` reports the jars a build *would* consume, not jars that are current. A jar produced before its inputs last changed is still on disk and gets indexed, so the IDE shows a stale API - a field added last week reads as `undefined` while `bazel build` succeeds. `background` builds the imported targets once per session to keep them current (incremental, so a no-op on an up-to-date repository). `off` never builds; use `Bazel: Build Classpath` by hand."
+          "markdownDescription": "`aquery` reports the jars a build *would* consume, not jars that are current. A jar produced before its inputs last changed is still on disk and gets indexed, so the IDE shows a stale API - a field added last week reads as `undefined` while `bazel build` succeeds. `background` builds the imported targets once per session to keep them current (incremental, so a no-op on an up-to-date repository). `off` never builds; use `JBazel: Build Classpath` by hand."
         },
         "bazelJava.discoveryNoFetch": {
           "type": "boolean",
@@ -161,8 +171,23 @@
           "type": "number",
           "default": 900,
           "markdownDescription": "`--max_idle_secs` for the IDE-owned bazel server. Only applies when `#bazelJava.outputBase#` is set."
+        },
+        "bazelJava.buildJobs": {
+          "type": "integer",
+          "default": 0,
+          "minimum": 0,
+          "markdownDescription": "`--jobs` for the builds this extension starts by itself. `0` leaves bazel's own default, which is every core - right for a build you are waiting on, wrong for one the indexer started behind your back on the machine you are typing on."
+        },
+        "bazelJava.mavenRepository": {
+          "type": "string",
+          "default": "maven",
+          "markdownDescription": "Name of the external repository holding the third-party artifacts, as `MODULE.bazel` names it. Used only by **JBazel: Fetch Library Sources** to find the source jars to download."
         }
       }
+    },
+    "configurationDefaults": {
+      "java.import.maven.enabled": false,
+      "java.import.gradle.enabled": false
     }
   }
 }

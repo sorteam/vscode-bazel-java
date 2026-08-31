@@ -100,9 +100,17 @@ public final class BuildClasspathJob extends Job {
 
             java.nio.file.Path targetFile =
                     session.getWorkspace().writeQueryFile(String.join("\n", labels));
-            session.getWorkspace().runStreaming(monitor, line -> { }, TIMEOUT_SECONDS,
+            /*
+                --jobs when configured: this build was started by the indexer, not asked for, and
+                taking every core on the machine the developer is typing on is the wrong default for
+                work nobody is waiting on.
+             */
+            List<String> arguments = new ArrayList<>(List.of(
                     "build", "--target_pattern_file=" + targetFile,
-                    "--keep_going", "--noshow_progress");
+                    "--keep_going", "--noshow_progress"));
+            session.getSettings().buildJobsArgument().ifPresent(arguments::add);
+            session.getWorkspace().runStreaming(monitor, line -> { }, TIMEOUT_SECONDS,
+                    arguments.toArray(String[]::new));
 
             Long after = fingerprintJars(executionRoot);
             long elapsed = System.currentTimeMillis() - started;
@@ -116,12 +124,12 @@ public final class BuildClasspathJob extends Job {
              */
             if (before != null && before.equals(after)) {
                 BazelLog.info(String.format(
-                        "Bazel: built %d target(s) in %d ms; jars unchanged, classpath left as is",
+                        "JBazel: built %d target(s) in %d ms; jars unchanged, classpath left as is",
                         labels.size(), elapsed));
                 DiscoveryRefreshJob.scheduleFor(session);
                 return Status.OK_STATUS;
             }
-            BazelLog.info(String.format("Bazel: built %d target(s) in %d ms; refreshing classpath",
+            BazelLog.info(String.format("JBazel: built %d target(s) in %d ms; refreshing classpath",
                     labels.size(), elapsed));
             DiscoveryRefreshJob.scheduleFor(session, true);
         } catch (CoreException e) {
@@ -129,7 +137,7 @@ public final class BuildClasspathJob extends Job {
                 schedule(BUSY_DEFER_MILLIS);
                 return Status.OK_STATUS;
             }
-            BazelLog.info("Bazel: build for the classpath failed: " + e.getMessage());
+            BazelLog.info("JBazel: build for the classpath failed: " + e.getMessage());
             return Status.OK_STATUS;
         }
         return Status.OK_STATUS;

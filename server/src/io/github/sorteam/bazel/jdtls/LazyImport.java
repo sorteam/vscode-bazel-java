@@ -42,7 +42,7 @@ public final class LazyImport {
             return "No BUILD file found above " + path;
         }
         if (session.getDiscoveryGate().shouldSkip()) {
-            return "Bazel is backing off for "
+            return "JBazel is backing off for "
                     + session.getDiscoveryGate().remainingSeconds() + " s.";
         }
 
