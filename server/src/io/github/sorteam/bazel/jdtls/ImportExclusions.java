@@ -13,9 +13,9 @@ import java.util.Set;
     BasicFileDetector, and that walk is Files.walkFileTree(root, EnumSet.of(FOLLOW_LINKS), ...): a
     bazel-out symlink in the repository root sends it into the whole action output tree, millions of
     files, and the import never returns. The extension used to answer that by asking the developer to
-    put --experimental_convenience_symlinks=ignore in the bazelrc and delete the symlinks - which
-    fixes java by breaking everything else in the repository that reads generated output through
-    bazel-bin, TypeScript configs first among them.
+    put --experimental_convenience_symlinks=ignore in the bazelrc and delete the symlinks - which is
+    not a java importer's call to make: the symlinks are bazel's, and other tooling in a repository
+    can resolve build outputs through them.
 
     The same detector honours exclusions: its constructor seeds them from
     Preferences.getJavaImportExclusions() and preVisitDirectory returns SKIP_SUBTREE for a match, so

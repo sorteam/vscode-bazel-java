@@ -12,14 +12,13 @@ Source folders are **linked**, never copied, and nothing is written into your wo
   (installed automatically as a dependency) - the importer runs inside its language server
 - `bazel` or `bazelisk` on `PATH`, or [`bazelJava.binary`](#settings) pointing at it
 - A repository with `MODULE.bazel`, `WORKSPACE.bazel`, `WORKSPACE` or `REPO.bazel` at its root
-Nothing needs to be done about the `bazel-*` convenience symlinks in the repository root. Keep them:
-in a mixed repository they are how everything that is not java - TypeScript configs reading generated
-clients out of `bazel-bin`, scripts, `jq` one-liners - resolves generated output. The language server
-looks for build files by walking the workspace with symlinks followed, which is why an unfenced
-`bazel-out` used to park the import in the action output tree; since 0.6.0 the extension adds those
-paths to `java.import.exclusions` on every import instead, so the scan skips them and the symlinks
-stay. Other large directories still matter - `node_modules` in particular - and `JBazel: Doctor`
-reports them.
+Nothing needs to be done about the `bazel-*` convenience symlinks in the repository root, and
+nothing needs to be removed: they are bazel's own, other tooling in a repository may resolve build
+outputs through them, and this extension does not read them - output paths come from `bazel info`. The
+language server looks for build files by walking the workspace with symlinks followed, which is why an
+unfenced `bazel-out` used to park the import in the action output tree; the extension adds those paths
+to `java.import.exclusions` on every import instead, so the scan skips them. Other large directories
+still matter - `node_modules` and similar - and `JBazel: Doctor` reports them.
 
 ## Getting started
 

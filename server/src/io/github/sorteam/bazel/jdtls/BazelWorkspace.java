@@ -108,9 +108,9 @@ public class BazelWorkspace {
     /*
         The convenience symlinks present in the repository root, sorted, or an empty list.
 
-        They belong to the developer and to everything else in the repository - a TypeScript config
-        that reads generated clients out of bazel-bin, most of all - so they are neither removed nor
-        argued with. What they need is to be kept out of the one scan that cannot survive them:
+        They belong to the developer and to whatever else in the repository resolves build outputs
+        through them, so they are neither removed nor argued with. What they need is to be kept out of
+        the one scan that cannot survive them:
         jdt.ls walks the workspace with FOLLOW_LINKS looking for build files, and one bazel-out is
         enough to send it into the whole action output tree. See ImportExclusions.
 
@@ -488,10 +488,9 @@ public class BazelWorkspace {
                         actively wrong: measured on bazel 9.2.0, a build repoints every convenience
                         symlink at the output base it ran in, so an IDE build would send bazel-bin
                         at ~/.cache/bazel-ide, where nothing but the IDE's own classpath targets was
-                        ever built - and everything else in the repository that reads generated
-                        output through bazel-bin (TypeScript configs, scripts) would read an empty
-                        tree until the next terminal build put it back. "normal" can also delete a
-                        symlink it considers ambiguous; "ignore" neither creates nor removes.
+                        ever built - so anything else resolving outputs through bazel-bin would read
+                        an empty tree until the next terminal build put it back. "normal" can also
+                        delete a symlink it considers ambiguous; "ignore" neither creates nor removes.
 
                         On the shared output base - the default - the IDE writes the same paths a
                         terminal build would, so there is nothing to protect against and no flag is

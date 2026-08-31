@@ -3,9 +3,10 @@
 ## 0.6.0
 
 A correction. 0.4.0 and 0.5.0 told you to put `common --experimental_convenience_symlinks=ignore` in
-the bazelrc and delete the `bazel-*` symlinks from the repository root. That advice fixed the Java
-import by breaking everything else in a mixed repository: TypeScript configs, scripts and anything
-else that resolves generated output through `bazel-bin` lost the path they read from. It is withdrawn.
+the bazelrc and delete the `bazel-*` symlinks from the repository root. That is not this extension's
+call to make: the symlinks are bazel's standard entry point into the outputs, other tooling in a
+repository can depend on them, and a java importer has no business asking for them to be turned off.
+The advice is withdrawn.
 
 - **The symlinks stay, and the scan is fenced off instead.** jdt.ls looks for build files by walking
   the workspace with symlinks followed, and the same walk skips any directory whose path matches

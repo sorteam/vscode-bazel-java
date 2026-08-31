@@ -210,10 +210,10 @@ final class Doctor {
         String text = contents.toString();
         /*
             No check for --experimental_convenience_symlinks any more. 0.4.0 and 0.5.0 demanded it,
-            which was wrong: the symlinks are what everything else in the repository resolves
-            generated output through, and asking for them to be turned off fixed the java import by
-            breaking the TypeScript side. Keeping jdt.ls out of the output tree is the extension's
-            job (ImportExclusions), not a line in someone's bazelrc.
+            which was wrong: how a repository configures bazel's own symlinks is not a java
+            importer's business, and other tooling there may resolve build outputs through them.
+            Keeping jdt.ls out of the output tree is the extension's job (ImportExclusions), not a
+            line in someone's bazelrc.
          */
         if (!text.contains("disk_cache")) {
             facts.add("consider            : common --disk_cache=~/.cache/bazel-disk with"

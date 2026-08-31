@@ -588,7 +588,7 @@ public final class PluginTests {
         The patterns that replace the retracted "delete the symlinks" advice. jdt.ls looks for build
         files with Files.walkFileTree(root, FOLLOW_LINKS, ...) and skips a directory whose full path
         matches one of java.import.exclusions, so the scan can be fenced off while the symlinks stay
-        exactly where the TypeScript side of the repository expects them.
+        exactly where bazel and the rest of the repository's tooling expect them.
      */
     private static void exclusionPatternsFenceOffTheOutputTree() throws Exception {
         Path root = Files.createTempDirectory("bazel-exclusions");

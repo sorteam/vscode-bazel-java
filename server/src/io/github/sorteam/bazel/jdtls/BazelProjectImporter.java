@@ -126,9 +126,9 @@ public class BazelProjectImporter extends AbstractProjectImporter {
     }
 
     /*
-        Convenience symlinks in the root are no longer anybody's misconfiguration: the repository
-        needs them (a TypeScript config reading generated clients out of bazel-bin, for one), and
-        what has to happen is that jdt.ls stops walking into them. That is done here, before this
+        Convenience symlinks in the root are no longer anybody's misconfiguration: they are bazel's,
+        other tooling in a repository may resolve outputs through them, and what has to happen is that
+        jdt.ls stops walking into them. That is done here, before this
         importer answers applies() - and therefore before the fallback importers, whose FOLLOW_LINKS
         scan is the thing that hangs on them, ever run. See ImportExclusions.
 

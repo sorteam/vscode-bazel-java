@@ -154,8 +154,8 @@ paths there from
 which runs at importer order 150, ahead of gradle (300), maven (400), eclipse (1000) and
 invisible-project (1500) detection, and on the path where this importer *declines* as well, since that
 is when jdt.ls falls through to those. The symlinks themselves are the developer's and the rest of the
-repository's: they are detected by target rather than by name (`--symlink_prefix` renames them) and
-reported, never removed. `--experimental_convenience_symlinks=ignore` goes only on builds that run in
+repository's - other tooling may resolve outputs through them - so they are detected by target rather
+than by name (`--symlink_prefix` renames them) and reported, never removed. `--experimental_convenience_symlinks=ignore` goes only on builds that run in
 an IDE-owned output base, where bazel would otherwise repoint `bazel-bin` at outputs only the IDE
 built.
 
