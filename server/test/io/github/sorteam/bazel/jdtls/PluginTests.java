@@ -699,6 +699,29 @@ public final class PluginTests {
                 elided.contains("REPIN=1 bazel run @maven//:pin"), elided);
         check("and still starts where bazel started", elided.startsWith("ERROR: xxx"), elided);
 
+        /*
+            "3 label(s) could not be analysed" reads as a rounding error until one of the three is the
+            service open in the editor. They are named.
+         */
+        check("the labels without a classpath are named",
+                BazelClasspathCache.describe(List.of("//a:x", "//b:y"))
+                        .equals("//a:x, //b:y"),
+                BazelClasspathCache.describe(List.of("//a:x", "//b:y")));
+        List<String> many = new ArrayList<>();
+        for (int i = 0; i < 12; i++) {
+            many.add("//pkg" + i + ":library");
+        }
+        check("and a long list keeps a count instead of a wall of text",
+                BazelClasspathCache.describe(many).endsWith("and 4 more"),
+                BazelClasspathCache.describe(many));
+
+        /* bazel's sign-off repeats the exit code and must not become the "last" error. */
+        String detail = BazelWorkspace.failureDetail(List.of(
+                "ERROR: /x/coursier.bzl:678: fetch of repository 'maven_nullaway' failed",
+                "ERROR: Build did NOT complete successfully"));
+        check("the summary line is not the one reported",
+                !detail.contains("did NOT complete"), detail);
+
         check("a plain build failure is not classified as a fetch problem",
                 !BazelWorkspace.isFetchFailure(List.of("ERROR: BUILD:3:1 syntax error")), "");
         check("the fetch markers are bazel's own wording",

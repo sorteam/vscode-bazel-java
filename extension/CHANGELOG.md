@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.6.2
+
+- **The labels bazel could not analyse are named.** "3 label(s) could not be analysed" reads as a
+  rounding error until one of those three is the service open in the editor - where every import is
+  then unresolved while the rest of the workspace is fine. The import report and the log now list
+  them (up to eight, then a count), so it is obvious which projects have no classpath and why.
+- Bazel's closing "Build did NOT complete successfully" no longer wins the "last error" slot in a
+  failure message; the last error that names something does.
+
 ## 0.6.1
 
 Two fixes on top of 0.6.0, both from watching it run against a repository where one external

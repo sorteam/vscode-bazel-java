@@ -423,6 +423,12 @@ public class BazelWorkspace {
         return false;
     }
 
+    private static boolean isSummary(String line) {
+        return line.contains("did NOT complete successfully")
+                || line.contains("Build did NOT complete")
+                || line.endsWith("Loading failed");
+    }
+
     private static boolean isCause(String line) {
         return line.startsWith(" ") || line.startsWith("\t") || line.startsWith("Error in ");
     }
@@ -438,8 +444,19 @@ public class BazelWorkspace {
                 return "(no stderr)";
             }
             String first = captured.get(0);
-            String last = captured.get(captured.size() - 1);
-            detail = first.contains(last) || last.contains(first) || captured.size() == 1
+            /*
+                bazel signs off with "Build did NOT complete successfully" and similar summaries that
+                repeat what the exit code already said. Skipping them keeps "last" meaning the last
+                error that names something.
+             */
+            String last = null;
+            for (int index = captured.size() - 1; index > 0; index--) {
+                if (!isSummary(captured.get(index))) {
+                    last = captured.get(index);
+                    break;
+                }
+            }
+            detail = last == null || first.contains(last) || last.contains(first)
                     ? first
                     : first + " | last: " + last;
         }

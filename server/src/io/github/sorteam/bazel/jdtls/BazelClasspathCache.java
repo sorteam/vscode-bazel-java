@@ -38,6 +38,9 @@ public final class BazelClasspathCache {
     /* One batch of 442 labels is 17.6 KB of query file and 4.6 s; chunking bounds both. */
     private static final int MAX_LABELS_PER_BATCH = 1000;
 
+    /* How many unanalysable labels are named before the message switches to a count. */
+    private static final int MAX_NAMED_LABELS = 8;
+
     private final BazelSession session;
     private final Map<String, List<String>> jarsByLabel = new HashMap<>();
 
@@ -136,7 +139,7 @@ public final class BazelClasspathCache {
         long started = System.currentTimeMillis();
         Map<String, List<String>> resolved = new LinkedHashMap<>();
         CoreException failure = null;
-        int unanalysed = 0;
+        List<String> unanalysedLabels = new ArrayList<>();
         for (int offset = 0; offset < pending.size(); offset += MAX_LABELS_PER_BATCH) {
             if (monitor != null && monitor.isCanceled()) {
                 break;
@@ -158,7 +161,8 @@ public final class BazelClasspathCache {
                  */
                 parser.finish();
                 failure = e;
-                unanalysed += Math.max(0, chunk.size() - parser.jarsByLabel().size());
+                chunk.stream().filter(label -> !parser.jarsByLabel().containsKey(label))
+                        .forEach(unanalysedLabels::add);
             }
             if (!parser.jarsByLabel().isEmpty()) {
                 session.getReport().countBatch();
@@ -180,13 +184,20 @@ public final class BazelClasspathCache {
             if (nothingResolved) {
                 throw failure;
             }
+            /*
+                Naming them is the whole point. "3 label(s) could not be analysed" reads as a
+                rounding error until one of those three is the service open in the editor, where
+                every import is then unresolved while the other 228 targets are fine.
+             */
+            String named = describe(unanalysedLabels);
             session.getReport().note("aquery partial", String.format(
-                    "%d label(s) could not be analysed, the rest resolved - %s",
-                    unanalysed, failure.getMessage()));
+                    "no classpath for %d label(s) - %s. The rest resolved. %s",
+                    unanalysedLabels.size(), named, failure.getMessage()));
             BazelLog.warnOnce("aquery-partial:" + session.getWorkspace().getRoot().getName(),
-                    String.format("JBazel: %d label(s) could not be analysed and keep their previous"
-                            + " classpath; the other targets resolved normally. %s",
-                            unanalysed, failure.getMessage()));
+                    String.format("JBazel: %d label(s) have no classpath because bazel could not"
+                            + " analyse them - %s. Every import in those projects stays unresolved;"
+                            + " the other targets resolved normally. %s",
+                            unanalysedLabels.size(), named, failure.getMessage()));
         }
 
         if (force) {
@@ -207,6 +218,17 @@ public final class BazelClasspathCache {
                 resolved.size(), elapsed, withJars));
         session.getReport().phase("classpath", elapsed);
         return resolved;
+    }
+
+    /* At most a handful of labels in one line, with a count for the rest. */
+    static String describe(List<String> labels) {
+        if (labels.isEmpty()) {
+            return "(none)";
+        }
+        int shown = Math.min(labels.size(), MAX_NAMED_LABELS);
+        String named = String.join(", ", labels.subList(0, shown));
+        return shown == labels.size() ? named
+                : named + " and " + (labels.size() - shown) + " more";
     }
 
     /*
