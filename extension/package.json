@@ -2,7 +2,7 @@
   "name": "vscode-bazel-java",
   "displayName": "Bazel Java Project Importer",
   "description": "Imports Bazel java targets into the Java Language Server using bazel aquery",
-  "version": "0.6.2",
+  "version": "0.6.3",
   "publisher": "belfegor",
   "license": "MIT",
   "icon": "icon.png",

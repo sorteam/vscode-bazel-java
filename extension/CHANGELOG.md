@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.6.3
+
+- **A settings change no longer drops the fence.** The language server does not edit its preferences
+  on `didChangeConfiguration`, it rebuilds them from what the client sends - which threw away the
+  output-tree exclusions the importer had written, and left the next workspace scan free to follow
+  `bazel-out` again until the next import attempt. They are now re-applied from a preference-change
+  listener, before the configuration change triggers anything else.
+- **`--symlink_prefix` is read from the bazelrc.** Symlinks are recognised by where they point, which
+  needs them to exist; the standing `bazel-*` exclusion is what covers one that a terminal build
+  creates after the last import, and it only ever guessed at the name. The prefix configured in the
+  rc files now gets a standing exclusion of its own. An empty prefix is refused - as a pattern it
+  would exclude the whole repository - and so is `--symlink_prefix=/`, which is bazel's way of asking
+  for no symlinks at all.
+- `JBazel: Doctor` prints `java.import.exclusions`: the patterns the client is sending and whether
+  the list is the default or one pinned in your settings. "Why does the scan still go into
+  `bazel-out`" was previously answerable only from the log.
+
 ## 0.6.2
 
 - **The labels bazel could not analyse are named.** "3 label(s) could not be analysed" reads as a

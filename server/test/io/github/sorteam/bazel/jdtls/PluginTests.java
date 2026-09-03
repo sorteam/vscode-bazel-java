@@ -45,6 +45,7 @@ public final class PluginTests {
         theSymlinkFlagIsPassedOnlyForADedicatedOutputBase();
         convenienceSymlinksInTheRootAreReported();
         exclusionPatternsFenceOffTheOutputTree();
+        theBazelrcSymlinkPrefixJoinsTheStandingExclusion();
         bazelFailuresKeepTheirCauseAndAreClassified();
         theGateSaysWhenAFailureNeedsAHuman();
         stampCoversSourceAttachmentsAndLombok();
@@ -596,7 +597,7 @@ public final class PluginTests {
         String base = root.toFile().getAbsolutePath();
 
         List<String> patterns = ImportExclusions.patterns(root.toFile(),
-                List.of("bazel-out", "out-main"), outputBase.toFile());
+                List.of("bazel-out", "out-main"), outputBase.toFile(), List.of());
         check("the standing pair covers symlinks created later",
                 patterns.contains(base + "/bazel-*") && patterns.contains(base + "/bazel-*/**"),
                 patterns.toString());
@@ -618,6 +619,56 @@ public final class PluginTests {
                 ImportExclusions.missing(merged, patterns).toString());
         check("and names exactly what is absent otherwise",
                 ImportExclusions.missing(List.of(), patterns).size() == patterns.size(), "");
+    }
+
+    /*
+        The gap the standing <root>/bazel-* pair leaves. A symlink is recognised by where it points,
+        which needs it to exist - so one that a terminal build creates *after* the last import
+        attempt is covered by name or not at all, and --symlink_prefix renames every one of them.
+        Bazel's rc files say what that prefix is, so the standing pair follows it.
+
+        The rejected values matter more than the accepted one: an empty prefix would turn into
+        <root>/*, which takes the whole repository out of the build-file scan and leaves the importer
+        with nothing to find.
+     */
+    private static void theBazelrcSymlinkPrefixJoinsTheStandingExclusion() throws Exception {
+        Path root = Files.createTempDirectory("bazel-symlink-prefix");
+        Files.writeString(root.resolve(".bazelrc"), String.join("\n",
+                "# build --symlink_prefix=commented-out",
+                "build --symlink_prefix=out-",
+                "common --symlink_prefix \"quoted-\"",
+                "build --symlink_prefix=.bazel/",
+                "build --jobs=4") + "\n");
+
+        List<String> prefixes = BazelRc.symlinkPrefixes(root.toFile());
+        check("the prefix is read off the bazelrc", prefixes.contains("out-"), prefixes.toString());
+        check("the space-separated form counts too, unquoted",
+                prefixes.contains("quoted-"), prefixes.toString());
+        check("a commented-out line does not",
+                !prefixes.contains("commented-out"), prefixes.toString());
+        check("a prefix that nests the symlinks is kept as written",
+                prefixes.contains(".bazel/"), prefixes.toString());
+
+        check("an empty prefix is refused - it would exclude the repository",
+                BazelRc.symlinkPrefixes("build --symlink_prefix=").isEmpty(), "");
+        check("so is bazel's spelling of 'create no symlinks'",
+                BazelRc.symlinkPrefixes("build --symlink_prefix=/").isEmpty(), "");
+        check("and so is a prefix that is itself a glob",
+                BazelRc.symlinkPrefixes("build --symlink_prefix=o*t").isEmpty(), "");
+        check("a bazelrc without the option leaves the default alone",
+                BazelRc.symlinkPrefixes("build --jobs=4\n").isEmpty(), "");
+
+        String base = root.toFile().getAbsolutePath();
+        List<String> patterns = ImportExclusions.patterns(root.toFile(), List.of(), null,
+                BazelRc.symlinkPrefixes(root.toFile()));
+        check("the renamed symlinks get a standing pair of their own",
+                patterns.contains(base + "/out-*") && patterns.contains(base + "/out-*/**"),
+                patterns.toString());
+        check("nested ones are fenced off one level down, where a glob star stops",
+                patterns.contains(base + "/.bazel/*") && patterns.contains(base + "/.bazel/*/**"),
+                patterns.toString());
+        check("bazel's own prefix is covered whatever the rc file says",
+                patterns.contains(base + "/bazel-*"), patterns.toString());
     }
 
     /*

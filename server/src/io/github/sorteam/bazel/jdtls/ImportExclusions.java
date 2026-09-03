@@ -25,24 +25,36 @@ import java.util.Set;
     Two shapes are emitted, and both are wanted:
 
     - <root>/bazel-* : the standing pair, so a symlink created by a terminal build *after* this ran
-      is still skipped;
-    - the paths of the symlinks actually found, plus the output base itself: --symlink_prefix renames
-      the symlinks, so a name-based pattern alone is not enough.
+      is still skipped - plus the same pair for every --symlink_prefix the bazelrc sets, since that
+      option renames all of them and the standing pair is the only thing covering a symlink that does
+      not exist yet;
+    - the paths of the symlinks actually found, plus the output base itself: a prefix given on the
+      command line appears in no rc file, so names are never the whole answer.
 
     No Eclipse types here, so the pattern arithmetic can be unit tested with plain javac. The write
-    into jdt.ls preferences lives in BazelProjectImporter, which runs before every fallback importer
-    (order 150 against gradle 300, maven 400, eclipse 1000, invisible 1500).
+    into jdt.ls preferences, and keeping it there across a settings change, is ScanFence; it is
+    driven from BazelProjectImporter, which runs before every fallback importer (order 150 against
+    gradle 300, maven 400, eclipse 1000, invisible 1500).
  */
 public final class ImportExclusions {
 
     private ImportExclusions() {
     }
 
-    public static List<String> patterns(File root, List<String> symlinks, File outputBase) {
+    /* prefixes are the --symlink_prefix values found in the bazelrc, if any; bazel's own default is
+       covered whether or not it is among them. See BazelRc.symlinkPrefixes. */
+    public static List<String> patterns(File root, List<String> symlinks, File outputBase,
+            List<String> prefixes) {
         Set<String> patterns = new LinkedHashSet<>();
         String base = normalise(root.getAbsolutePath());
-        patterns.add(base + "/bazel-*");
-        patterns.add(base + "/bazel-*/**");
+        List<String> standing = new ArrayList<>(List.of("bazel-"));
+        if (prefixes != null) {
+            standing.addAll(prefixes);
+        }
+        for (String prefix : standing) {
+            patterns.add(base + "/" + prefix + "*");
+            patterns.add(base + "/" + prefix + "*/**");
+        }
         for (String symlink : symlinks) {
             patterns.add(base + "/" + symlink);
             patterns.add(base + "/" + symlink + "/**");

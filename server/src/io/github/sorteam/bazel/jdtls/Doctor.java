@@ -81,11 +81,16 @@ final class Doctor {
             means someone pinned java.import.exclusions to a list of their own.
          */
         List<String> symlinks = workspace.convenienceSymlinks();
+        List<String> prefixes = BazelRc.symlinkPrefixes(root);
+        if (!prefixes.isEmpty()) {
+            facts.add("symlink prefix      : " + String.join(", ", prefixes)
+                    + " (--symlink_prefix in the bazelrc; excluded by name as well as by target)");
+        }
         if (symlinks.isEmpty()) {
             facts.add("convenience symlinks: none in the repository root");
         } else {
             List<String> missing = ImportExclusions.missing(importExclusions(),
-                    ImportExclusions.patterns(root, symlinks, workspace.peekOutputBase()));
+                    ImportExclusions.patterns(root, symlinks, workspace.peekOutputBase(), prefixes));
             if (missing.isEmpty()) {
                 facts.add("convenience symlinks: " + String.join(", ", symlinks)
                         + " (excluded from the java build-file scan)");
@@ -172,28 +177,17 @@ final class Doctor {
 
     /*
         The bazelrc lines that matter for an IDE, checked by reading the rc files this plugin can
-        find. Bazel's own resolution is richer than this - try-import, --bazelrc, the aspect layers -
-        so the files that were read are listed rather than implied, and a line found anywhere counts.
+        find (BazelRc.candidates - the same list the importer reads --symlink_prefix from). Bazel's
+        own resolution is richer than this - try-import, --bazelrc, the aspect layers - so the files
+        that were read are listed rather than implied, and a line found anywhere counts. Read here
+        rather than through BazelRc.read because an rc file that exists and cannot be read is itself
+        worth reporting.
      */
     static List<String> bazelrcProblems(File root, List<String> facts) {
         List<String> problems = new ArrayList<>();
-        List<File> candidates = new ArrayList<>(List.of(
-                new File(root, ".bazelrc"),
-                new File(root, ".bazelrc.user"),
-                new File(root, "user.bazelrc"),
-                new File(System.getProperty("user.home"), ".bazelrc")));
-        File aspect = new File(root, ".aspect/bazelrc");
-        File[] aspectFiles = aspect.listFiles((dir, name) -> name.endsWith(".bazelrc"));
-        if (aspectFiles != null) {
-            candidates.addAll(List.of(aspectFiles));
-        }
-
         StringBuilder contents = new StringBuilder();
         List<String> read = new ArrayList<>();
-        for (File candidate : candidates) {
-            if (!candidate.isFile()) {
-                continue;
-            }
+        for (File candidate : BazelRc.candidates(root)) {
             try {
                 contents.append(Files.readString(candidate.toPath(), StandardCharsets.UTF_8))
                         .append('\n');

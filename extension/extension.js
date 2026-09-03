@@ -130,6 +130,35 @@ function settingsAdvice() {
   }
   lines.push(`    autobuild.enabled     : ${java.get("autobuild.enabled")}`);
 
+  /*
+    The setting that decides whether the workspace scan walks into bazel-out. The server half of the
+    report says which patterns are missing from the list the language server is running with; this
+    says what the client is sending it, which is the difference that explains a scan still following
+    the symlinks after the importer fenced them off.
+  */
+  const exclusions = java.get("import.exclusions") || [];
+  const inspected = java.inspect("import.exclusions") || {};
+  const pinned =
+    inspected.workspaceFolderValue !== undefined ||
+    inspected.workspaceValue !== undefined ||
+    inspected.globalValue !== undefined;
+  lines.push(
+    `    import.exclusions     : ${exclusions.length} pattern(s), ${pinned ? "set in your settings" : "default"}`
+  );
+  for (const pattern of exclusions) {
+    lines.push(`                            ${pattern}`);
+  }
+  if (pinned && !exclusions.some((pattern) => String(pattern).includes("bazel"))) {
+    lines.push(
+      "    note                  : a list set in your settings replaces the extension's default " +
+        "rather than\n                            extending it, and nothing in this one mentions " +
+        "bazel. The importer writes\n                            the output paths back on every " +
+        "attempt and again whenever a settings change\n                            rebuilds the " +
+        "list, so what is exposed is the first scan of a session; the\n                          " +
+        "  doctor section above prints anything still missing."
+    );
+  }
+
   let out = lines.join("\n") + "\n";
   if (problems.length > 0) {
     out += "\n";

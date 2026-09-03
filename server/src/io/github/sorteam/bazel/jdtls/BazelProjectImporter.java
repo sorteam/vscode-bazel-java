@@ -9,9 +9,6 @@ import org.eclipse.core.runtime.OperationCanceledException;
 import org.eclipse.core.runtime.SubMonitor;
 import org.eclipse.jdt.core.IJavaProject;
 import org.eclipse.jdt.ls.core.internal.AbstractProjectImporter;
-import org.eclipse.jdt.ls.core.internal.JavaLanguageServerPlugin;
-import org.eclipse.jdt.ls.core.internal.preferences.PreferenceManager;
-import org.eclipse.jdt.ls.core.internal.preferences.Preferences;
 
 public class BazelProjectImporter extends AbstractProjectImporter {
 
@@ -40,7 +37,19 @@ public class BazelProjectImporter extends AbstractProjectImporter {
             return false;
         }
         session = BazelSession.forRoot(rootFolder);
-        excludeOutputTreesFromScans();
+
+        /*
+            Convenience symlinks in the root are no longer anybody's misconfiguration: they are
+            bazel's, other tooling in a repository may resolve outputs through them, and what has to
+            happen is that jdt.ls stops walking into them. Raised here, before this importer answers
+            applies() - and therefore before the fallback importers, whose FOLLOW_LINKS scan is the
+            thing that hangs on them, ever run. See ScanFence and ImportExclusions.
+
+            It matters that this is above the backoff return as well: the dangerous case is precisely
+            the one where this importer declines, because that is when jdt.ls moves on to gradle,
+            maven, eclipse and invisible-project detection.
+         */
+        ScanFence.raise(session);
 
         /*
             The backoff window is enforced here rather than inside the import itself. jdt.ls asks the
@@ -123,43 +132,6 @@ public class BazelProjectImporter extends AbstractProjectImporter {
         session.getStore().save();
 
         imported = !projects.isEmpty();
-    }
-
-    /*
-        Convenience symlinks in the root are no longer anybody's misconfiguration: they are bazel's,
-        other tooling in a repository may resolve outputs through them, and what has to happen is that
-        jdt.ls stops walking into them. That is done here, before this
-        importer answers applies() - and therefore before the fallback importers, whose FOLLOW_LINKS
-        scan is the thing that hangs on them, ever run. See ImportExclusions.
-
-        Called from both exits of applies(): the dangerous case is precisely the one where this
-        importer declines - a backoff window or a failed discovery - because that is when jdt.ls
-        moves on to gradle, maven, eclipse and invisible-project detection.
-     */
-    private void excludeOutputTreesFromScans() {
-        PreferenceManager manager = JavaLanguageServerPlugin.getPreferencesManager();
-        Preferences preferences = manager == null ? null : manager.getPreferences();
-        if (preferences == null) {
-            return;
-        }
-        BazelWorkspace workspace = session.getWorkspace();
-        if (workspace.peekExecutionRoot() == null) {
-            String stored = session.getStore().peekExecutionRoot();
-            if (stored != null && !stored.isBlank()) {
-                workspace.setExecutionRoot(new File(stored));
-            }
-        }
-        List<String> symlinks = workspace.convenienceSymlinks();
-        List<String> merged = ImportExclusions.merge(preferences.getJavaImportExclusions(),
-                ImportExclusions.patterns(rootFolder, symlinks, workspace.peekOutputBase()));
-        if (merged == null) {
-            return;
-        }
-        preferences.setJavaImportExclusions(merged);
-        BazelLog.info(String.format(
-                "JBazel: excluded the bazel output tree from the language server's build-file scan"
-                        + " (%s); the symlinks themselves are left alone",
-                symlinks.isEmpty() ? "no symlinks in the root yet" : String.join(", ", symlinks)));
     }
 
     /*

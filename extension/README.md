@@ -17,8 +17,9 @@ nothing needs to be removed: they are bazel's own, other tooling in a repository
 outputs through them, and this extension does not read them - output paths come from `bazel info`. The
 language server looks for build files by walking the workspace with symlinks followed, which is why an
 unfenced `bazel-out` used to park the import in the action output tree; the extension adds those paths
-to `java.import.exclusions` on every import instead, so the scan skips them. Other large directories
-still matter - `node_modules` and similar - and `JBazel: Doctor` reports them.
+to `java.import.exclusions` on every import instead, so the scan skips them, and puts them back when a
+settings change rebuilds that list. A `--symlink_prefix` in your bazelrc is read and covered too. Other
+large directories still matter - `node_modules` and similar - and `JBazel: Doctor` reports them.
 
 ## Getting started
 
@@ -188,9 +189,9 @@ afterwards offers to reimport straight away.
 
 **The import never finishes.** Check `JBazel: Doctor` for a directory the first workspace scan has to
 walk. The `bazel-*` symlinks are excluded automatically; a pinned `java.import.exclusions` in your own
-settings replaces that list rather than extending it, and the doctor then prints the exact patterns to
-add back. Vendor directories inside the workspace (`node_modules`, `.venv`, `vendor`) are the other
-usual answer.
+settings replaces that list rather than extending it, and the doctor prints both what the client is
+sending and the exact patterns to add back. Vendor directories inside the workspace (`node_modules`,
+`.venv`, `vendor`) are the other usual answer.
 
 **The status bar says bazel cannot fetch a repository.** Analysis cannot run, so no classpath can be
 resolved - typically a `rules_jvm_external` lock file that needs repinning after `MODULE.bazel`
