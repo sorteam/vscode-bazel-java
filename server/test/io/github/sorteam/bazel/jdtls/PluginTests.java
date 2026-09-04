@@ -32,6 +32,7 @@ public final class PluginTests {
         groupingMergesMainAndTest();
         groupingDeduplicatesSharedSourceRoots();
         groupingCanBeDisabled();
+        repositoryLayoutRefusesOverlappingLocations();
         settingsReadBazelProjectDirectories();
         settingsUniverseHandlesExclusions();
         queryParsesTargetsAndSkipsSourcelessRules();
@@ -295,6 +296,69 @@ public final class PluginTests {
     }
 
     /* -------------------------------------------------------------- settings */
+
+    /*
+        The repository layout puts a project's directory inside the working copy, because three
+        pieces of the java tooling - jdt.ls's startup cleanup, the Spring classpath bridge and the
+        main-class search behind the Spring Boot Dashboard - all skip projects whose location is
+        elsewhere. What must never happen is one project becoming the parent of another: a project
+        owns its whole tree, so overlapping locations hand the same sources to two projects, and a
+        project at the repository root owns every other project.
+     */
+    private static void repositoryLayoutRefusesOverlappingLocations() {
+        ProjectGrouping.ProjectSpec service = new ProjectGrouping.ProjectSpec("services.post",
+                List.of(new ProjectGrouping.SourceFolder("services/post/src/main/java", false),
+                        new ProjectGrouping.SourceFolder("services/post/src/test/java", true)),
+                List.of("//services/post:lib"), List.of("//services/post:test"));
+        ProjectGrouping.ProjectSpec nested = new ProjectGrouping.ProjectSpec("services.post.api",
+                List.of(new ProjectGrouping.SourceFolder("services/post/api/src/main/java", false)),
+                List.of("//services/post/api:lib"), List.of());
+        ProjectGrouping.ProjectSpec split = new ProjectGrouping.ProjectSpec("wide",
+                List.of(new ProjectGrouping.SourceFolder("jobs/a/src/main/java", false),
+                        new ProjectGrouping.SourceFolder("tools/b/src/main/java", false)),
+                List.of("//jobs/a:lib"), List.of());
+
+        ProjectLocations.Layout single = ProjectLocations.inRepository(List.of(service));
+        check("the directory is the bazel package of the project's targets",
+                "services/post".equals(single.directories().get("services.post")),
+                single.directories().toString());
+
+        ProjectLocations.Layout both = ProjectLocations.inRepository(List.of(service, nested));
+        check("the outer project yields and the inner one keeps its directory",
+                both.keptInMetadata().equals(List.of("services.post"))
+                        && "services/post/api".equals(both.directories().get("services.post.api")),
+                both.directories() + " / " + both.keptInMetadata());
+
+        ProjectGrouping.ProjectSpec twin = new ProjectGrouping.ProjectSpec("services.post.extra",
+                List.of(new ProjectGrouping.SourceFolder("services/post/src/extra/java", false)),
+                List.of("//services/post:extra"), List.of());
+        ProjectLocations.Layout shared = ProjectLocations.inRepository(List.of(service, twin));
+        check("two projects in one package both stay in the metadata layout",
+                shared.directories().isEmpty() && shared.keptInMetadata().size() == 2,
+                shared.directories() + " / " + shared.keptInMetadata());
+
+        ProjectGrouping.ProjectSpec rootPackage = new ProjectGrouping.ProjectSpec("root",
+                List.of(new ProjectGrouping.SourceFolder("src/main/java", false)),
+                List.of("//:lib"), List.of());
+        check("a target in the root package is refused - it would own the repository",
+                ProjectLocations.inRepository(List.of(rootPackage)).directories().isEmpty(), "");
+
+        ProjectLocations.Layout wide = ProjectLocations.inRepository(List.of(split));
+        check("a source folder outside the package is refused",
+                wide.directories().isEmpty() && wide.keptInMetadata().contains("wide"),
+                wide.directories().toString());
+
+        ProjectGrouping.ProjectSpec sourceless = new ProjectGrouping.ProjectSpec("empty",
+                List.of(), List.of("//empty:lib"), List.of());
+        check("so is a project without sources",
+                ProjectLocations.inRepository(List.of(sourceless)).directories().isEmpty(), "");
+
+        ProjectLocations.Layout mixed = ProjectLocations.inRepository(List.of(service, split));
+        check("one bad project does not cost the others their directory",
+                "services/post".equals(mixed.directories().get("services.post"))
+                        && mixed.keptInMetadata().equals(List.of("wide")),
+                mixed.directories() + " / " + mixed.keptInMetadata());
+    }
 
     private static void settingsReadBazelProjectDirectories() throws IOException {
         Path root = Files.createTempDirectory("bazel-settings-test");
@@ -836,6 +900,28 @@ public final class PluginTests {
                 "lombok-1.18.30.jar".equals(BazelClasspathContainer
                         .jarFile(root.toFile(), "header_lombok-1.18.30.jar").getName()),
                 BazelClasspathContainer.jarFile(root.toFile(), "header_lombok-1.18.30.jar")
+                        .getName());
+
+        /*
+            The same substitution for every maven dependency, not just lombok. The header jar has no
+            class bodies and, more consequentially, carries a bazel-internal file name: the Spring
+            Boot Dashboard decides a project is an application by looking for a classpath jar whose
+            name starts with "spring-boot", and "header_spring-boot-4.0.7.jar" does not.
+         */
+        Files.writeString(root.resolve("header_spring-boot-4.0.7.jar"), "abi");
+        Files.writeString(root.resolve("spring-boot-4.0.7.jar"), "classes");
+        check("a maven header jar resolves to the artifact next to it",
+                "spring-boot-4.0.7.jar".equals(BazelClasspathContainer
+                        .jarFile(root.toFile(), "header_spring-boot-4.0.7.jar").getName()),
+                BazelClasspathContainer.jarFile(root.toFile(), "header_spring-boot-4.0.7.jar")
+                        .getName());
+
+        /* A header jar with nothing beside it - a target's own hjar - stays as aquery reported it. */
+        Files.writeString(root.resolve("header_liblocal-hjar.jar"), "abi");
+        check("a header jar without a counterpart is left alone",
+                "header_liblocal-hjar.jar".equals(BazelClasspathContainer
+                        .jarFile(root.toFile(), "header_liblocal-hjar.jar").getName()),
+                BazelClasspathContainer.jarFile(root.toFile(), "header_liblocal-hjar.jar")
                         .getName());
     }
 

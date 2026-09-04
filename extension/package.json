@@ -2,7 +2,7 @@
   "name": "vscode-bazel-java",
   "displayName": "Bazel Java Project Importer",
   "description": "Imports Bazel java targets into the Java Language Server using bazel aquery",
-  "version": "0.6.5",
+  "version": "0.7.1",
   "publisher": "belfegor",
   "license": "MIT",
   "icon": "icon.png",
@@ -121,6 +121,15 @@
           ],
           "default": "lazy",
           "markdownDescription": "`lazy` imports the configured scope and, when a java file outside it is opened, provisions that one package on demand. `eager` imports the configured scope and nothing else. With no scope configured the two are identical, since everything is already in scope."
+        },
+        "bazelJava.projectLayout": {
+          "type": "string",
+          "enum": [
+            "metadata",
+            "repository"
+          ],
+          "default": "metadata",
+          "markdownDescription": "Where a generated project's directory lives. `metadata` keeps it in the language server's own storage and writes nothing into your working copy. Set it to `repository` if you want the Spring Tools index - beans, endpoints, live hovers, the `@` symbol searches: that indexer reads a source folder as *project location + entry path*, so with the `metadata` layout it looks at directories that do not exist and finds nothing. `repository` puts the project directory at the bazel package its targets come from, which makes those paths real. The Spring Boot Dashboard's list of applications does not need this. Class output stays in the language server's storage either way, so the working copy is still untouched. A project whose directory would contain another project's keeps the `metadata` layout. Changing this recreates the projects and costs one reindex."
         },
         "bazelJava.maxProjects": {
           "type": "number",

@@ -117,7 +117,25 @@ public class BazelClasspathContainer implements IClasspathContainer {
     static File jarFile(File executionRoot, String jar) {
         File file = jar.startsWith("/") ? new File(jar) : new File(executionRoot, jar);
         String name = file.getName();
-        if (name.startsWith("header_lombok-") && name.endsWith(".jar")) {
+        /*
+            aquery reports what javac consumes, and for a maven dependency that is bazel's header
+            jar - "header_spring-boot-4.0.7.jar" next to the real "spring-boot-4.0.7.jar" that
+            rules_jvm_external downloaded. The real one is preferred wherever it exists, for two
+            reasons.
+
+            It has the class bodies, so navigating into a library shows code rather than an ABI
+            stub. And its file name is the maven artifact name, which tooling reads: the Spring Boot
+            Dashboard decides whether a project is an application by looking for a classpath jar
+            whose name starts with "spring-boot", so with header jars it finds no applications
+            anywhere. That was the whole reason the dashboard stayed empty on a workspace where the
+            projects, the classpath and the index were all fine.
+
+            The check is by existence, so a header jar with no counterpart - a target's own hjar,
+            anything a rule generated - is left exactly as aquery reported it. Lombok was the first
+            case of this and is now just one of them: its header jar carries no annotation
+            processor, and javac on the IDE side needs the real one.
+         */
+        if (name.startsWith("header_") && name.endsWith(".jar")) {
             File full = new File(file.getParentFile(), name.substring("header_".length()));
             if (full.isFile()) {
                 return full;

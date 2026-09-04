@@ -157,6 +157,22 @@ repository.
 no longer a workspace folder; what is otherwise stale is decided against the current target list by
 [ProjectProvisioner](server/src/io/github/sorteam/bazel/jdtls/ProjectProvisioner.java).
 
+**Two project layouts, because the ecosystem assumes the second one.** Generated projects live in the
+language server's metadata area by default, with the sources linked in, so nothing is written to the
+working copy. Parts of the java tooling assume a project's location is inside the workspace folder and
+skip the projects where it is not: jdt.ls deletes them at startup
+(`StandardProjectsManager.deleteInvalidProjects`, which is why
+[BazelBuildSupport](server/src/io/github/sorteam/bazel/jdtls/BazelBuildSupport.java) claims them), and
+the Spring Tools classpath bridge computes a source folder as *project location + entry path*, hands
+its indexer a directory that does not exist and indexes nothing - measured on a 116-project
+workspace, 228 of 244 source entries pointed nowhere. `bazelJava.projectLayout: repository` satisfies
+the assumption instead: the project directory is the bazel package its targets
+come from, while class output and the relocated-source folders stay linked into the metadata area, so
+the working copy is still untouched.
+[ProjectLocations](server/src/io/github/sorteam/bazel/jdtls/ProjectLocations.java) refuses a directory
+that would contain another project's - a project owns its whole tree, so overlapping locations would
+hand the same sources to two projects - and those projects keep the metadata layout.
+
 **The bazel output tree is fenced off from the language server's scan, and the symlinks are left
 alone.** jdt.ls finds build files with `BasicFileDetector`, which walks the workspace as
 `Files.walkFileTree(root, EnumSet.of(FOLLOW_LINKS), ...)`, so one `bazel-out` in the root used to send

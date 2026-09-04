@@ -21,6 +21,14 @@ to `java.import.exclusions` on every import instead, so the scan skips them, and
 settings change rebuilds that list. A `--symlink_prefix` in your bazelrc is read and covered too. Other
 large directories still matter - `node_modules` and similar - and `JBazel: Doctor` reports them.
 
+**The Spring Tools index** - beans, endpoints, live hovers, the `@` symbol searches - needs
+`bazelJava.projectLayout: repository`. That indexer reads a source folder as *project location + entry
+path*, and by default a generated project's directory lives in the language server's storage, so the
+paths it builds do not exist and it indexes nothing. With `repository` the project directory is the
+bazel package its targets come from and the paths are real. Class output stays in the language
+server's storage either way, so nothing is written to your working copy. The Spring Boot Dashboard's
+list of applications works without this.
+
 ## Getting started
 
 Open the repository and wait for "Workspace initialized". That is all, on a small repository.

@@ -6,6 +6,7 @@ import java.util.Arrays;
 import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 import org.eclipse.core.resources.FileInfoMatcherDescription;
@@ -42,10 +43,25 @@ public class ProjectProvisioner {
 
     private final Set<String> freshlyCreated = new LinkedHashSet<>();
 
+    /* Project name -> repository-relative directory, empty in the metadata layout. */
+    private Map<String, String> repositoryDirectories = Map.of();
+    private int relaidOut;
+
     private int created;
     private int updated;
     private int unchanged;
     private static final String RELOCATED_SUFFIX = "-relocated";
+
+    /* Class output, always in the language server's metadata - see linkOutputFolders. */
+    private static final List<String> OUTPUT_FOLDERS = List.of("bin", "bin-test");
+
+    /*
+        Directory names that are never java sources and can dominate a project's resource tree. Only
+        relevant in the repository layout, where the project directory is a directory of the
+        repository and everything under it is in the tree.
+     */
+    private static final List<String> UNWANTED_IN_PROJECT =
+            List.of("node_modules", ".git", "dist", "target", ".venv", "venv", ".yarn", ".pnpm-store");
     private static final String REGEX_MATCHER = "org.eclipse.core.resources.regexFilterMatcher";
 
     private int pruned;
@@ -91,6 +107,7 @@ public class ProjectProvisioner {
         IWorkspace workspace = ResourcesPlugin.getWorkspace();
         List<IJavaProject> projects = new ArrayList<>(specs.size());
         SubMonitor progress = SubMonitor.convert(monitor, 3);
+        planLayout(specs);
         boolean autoBuilding = setAutoBuilding(workspace, false);
         try {
             workspace.run(inner -> {
@@ -129,6 +146,12 @@ public class ProjectProvisioner {
             } else {
                 progress.worked(1);
             }
+            if (relaidOut > 0) {
+                BazelLog.info(String.format(
+                        "JBazel: %d project(s) changed layout and were recreated; nothing was"
+                                + " deleted from the working copy, and JDT reindexes them once",
+                        relaidOut));
+            }
         } finally {
             setAutoBuilding(workspace, autoBuilding);
         }
@@ -150,6 +173,34 @@ public class ProjectProvisioner {
         }
     }
 
+    /*
+        Decides where the project directories go before anything is created, because the answer for
+        one project depends on all the others: two projects may not overlap on disk. Off by default,
+        and a project that cannot have a directory of its own simply keeps the metadata layout.
+     */
+    private void planLayout(List<ProjectGrouping.ProjectSpec> specs) {
+        if (!session.getSettings().isRepositoryLayout()) {
+            repositoryDirectories = Map.of();
+            return;
+        }
+        ProjectLocations.Layout layout = ProjectLocations.inRepository(specs);
+        repositoryDirectories = layout.directories();
+        if (!layout.keptInMetadata().isEmpty()) {
+            BazelLog.info(String.format(
+                    "JBazel: %d of %d project(s) keep the metadata layout - their directory would"
+                            + " contain another project's, or is not inside their bazel package"
+                            + " (for example %s)",
+                    layout.keptInMetadata().size(), specs.size(),
+                    layout.keptInMetadata().get(0)));
+        }
+    }
+
+    /* The directory this project should live in, or null when it belongs in the metadata area. */
+    private File repositoryDirectory(ProjectGrouping.ProjectSpec spec) {
+        String relative = repositoryDirectories.get(spec.name());
+        return relative == null ? null : new File(session.getWorkspace().getRoot(), relative);
+    }
+
     /* Phase one: the project exists, is open and carries the java nature when this returns. */
     private void createOrOpen(ProjectGrouping.ProjectSpec spec, IProgressMonitor monitor)
             throws CoreException {
@@ -157,8 +208,21 @@ public class ProjectProvisioner {
         IWorkspace eclipseWorkspace = ResourcesPlugin.getWorkspace();
         IProject project = eclipseWorkspace.getRoot().getProject(spec.name());
 
+        File directory = repositoryDirectory(spec);
+        if (project.exists() && !livesIn(project, directory)) {
+            /*
+                A project's location is fixed at creation, so switching layouts means removing it
+                from the workspace and making it again. deleteContent is false: in the repository
+                layout that content is the developer's sources.
+             */
+            project.delete(false, true, progress.split(1));
+            relaidOut++;
+        }
         if (!project.exists()) {
             IProjectDescription description = eclipseWorkspace.newProjectDescription(spec.name());
+            if (directory != null) {
+                description.setLocation(new Path(directory.getAbsolutePath()));
+            }
             project.create(description, progress.split(1));
             freshlyCreated.add(spec.name());
             created++;
@@ -171,6 +235,24 @@ public class ProjectProvisioner {
             progress.worked(1);
         }
         ensureJavaNature(project, progress.split(1));
+    }
+
+    /*
+        Whether the project on disk is already where this layout wants it. The workspace's own
+        default location has no path to compare, so it is recognised by the project sitting directly
+        under the workspace root with its own name.
+     */
+    private static boolean livesIn(IProject project, File directory) {
+        IPath location = project.getLocation();
+        if (location == null) {
+            return directory == null;
+        }
+        if (directory != null) {
+            return location.toFile().getAbsolutePath()
+                    .equals(directory.getAbsolutePath());
+        }
+        IPath workspace = ResourcesPlugin.getWorkspace().getRoot().getLocation();
+        return workspace != null && workspace.append(project.getName()).equals(location);
     }
 
     /*
@@ -195,6 +277,64 @@ public class ProjectProvisioner {
         project.setDescription(description, monitor);
     }
 
+    /* Where this project's generated bits go when its directory belongs to the repository. */
+    private static IPath metadataDirectory(IProject project) {
+        return ResourcesPlugin.getWorkspace().getRoot().getLocation().append(project.getName());
+    }
+
+    private static String relativeTo(File directory, File child) {
+        String parent = directory.getAbsolutePath() + File.separator;
+        String path = child.getAbsolutePath();
+        return path.startsWith(parent)
+                ? path.substring(parent.length()).replace(File.separatorChar, '/')
+                : child.getName();
+    }
+
+    /*
+        Class output for a project that lives in the repository. It cannot be a real directory there:
+        .class files next to the sources are noise in the working copy at best, and at worst
+        something a BUILD glob picks up. Linked into the metadata area instead, so "nothing is
+        written to the working copy" holds in both layouts.
+     */
+    private static void linkOutputFolders(IProject project, IProgressMonitor monitor)
+            throws CoreException {
+        SubMonitor progress = SubMonitor.convert(monitor, OUTPUT_FOLDERS.size());
+        for (String name : OUTPUT_FOLDERS) {
+            IFolder folder = project.getFolder(name);
+            IPath target = metadataDirectory(project).append(name);
+            target.toFile().mkdirs();
+            if (!folder.exists() || !target.equals(folder.getLocation())) {
+                folder.createLink(target, IResource.REPLACE | IResource.ALLOW_MISSING_LOCAL,
+                        progress.split(1));
+            } else {
+                progress.worked(1);
+            }
+        }
+    }
+
+    /*
+        Keeps dependency trees out of the project's resource tree. In the metadata layout a project
+        holds nothing but its links, but a project rooted in the repository holds everything under
+        that directory - and a service package with a web app in it carries a node_modules that
+        dwarfs the java. Inheritable, so it applies at any depth, and it only ever hides folders.
+     */
+    private static void filterUnwanted(IProject project) throws CoreException {
+        List<String> quoted = new ArrayList<>();
+        UNWANTED_IN_PROJECT.forEach(name -> quoted.add(Pattern.quote(name)));
+        quoted.add("bazel-.*");
+        String pattern = "^(" + String.join("|", quoted) + ")$";
+        for (IResourceFilterDescription existing : project.getFilters()) {
+            if (pattern.equals(existing.getFileInfoMatcherDescription().getArguments())) {
+                return;
+            }
+        }
+        project.createFilter(
+                IResourceFilterDescription.EXCLUDE_ALL | IResourceFilterDescription.FOLDERS
+                        | IResourceFilterDescription.INHERITABLE,
+                new FileInfoMatcherDescription(REGEX_MATCHER, pattern),
+                IResource.NONE, new NullProgressMonitor());
+    }
+
     /* Phase two: links, bazel identity and classpath, on a project the java model already knows. */
     private IJavaProject configure(ProjectGrouping.ProjectSpec spec, IProgressMonitor monitor)
             throws CoreException {
@@ -206,6 +346,10 @@ public class ProjectProvisioner {
         }
 
         File root = session.getWorkspace().getRoot();
+        if (repositoryDirectory(spec) != null) {
+            filterUnwanted(project);
+            linkOutputFolders(project, new NullProgressMonitor());
+        }
         List<LinkedFolder> links = linkFolders(project, spec, root, progress.split(1));
         removeStaleLinks(project, links);
 
@@ -258,19 +402,31 @@ public class ProjectProvisioner {
         List<LinkedFolder> links = new ArrayList<>();
         Set<String> usedNames = new HashSet<>();
 
+        File directory = repositoryDirectory(spec);
         for (ProjectGrouping.SourceFolder source : spec.sourceFolders()) {
             String name = uniqueName(source, usedNames);
-            IFolder folder = project.getFolder(name);
             File location = new File(root, source.path());
-            IPath path = new Path(location.getAbsolutePath());
-            if (!folder.exists() || !path.equals(folder.getLocation())) {
-                folder.createLink(path,
-                        IResource.REPLACE | IResource.ALLOW_MISSING_LOCAL, progress.split(1));
+            IFolder folder;
+            if (directory == null) {
+                folder = project.getFolder(name);
+                IPath path = new Path(location.getAbsolutePath());
+                if (!folder.exists() || !path.equals(folder.getLocation())) {
+                    folder.createLink(path,
+                            IResource.REPLACE | IResource.ALLOW_MISSING_LOCAL, progress.split(1));
+                } else {
+                    progress.worked(1);
+                }
             } else {
+                /*
+                    The sources are inside the project directory here, so the classpath entry is an
+                    ordinary relative path - which is exactly what the tooling that skips linked
+                    folders wants to see. ProjectLocations guarantees the containment.
+                 */
+                folder = project.getFolder(new Path(relativeTo(directory, location)));
                 progress.worked(1);
             }
             List<String> excluded = new ArrayList<>(source.excluded());
-            relocate(project, name, location, source, excluded, links);
+            relocate(project, folder, name, directory != null, location, source, excluded, links);
             links.add(new LinkedFolder(folder, source.test(), excluded));
         }
         return links;
@@ -282,9 +438,9 @@ public class ProjectProvisioner {
         for why. The companion folder is rebuilt from scratch every time: it holds a handful of links
         and no content of its own, and rebuilding is simpler than working out which of them moved.
      */
-    private void relocate(IProject project, String name, File location,
-            ProjectGrouping.SourceFolder source, List<String> excluded, List<LinkedFolder> links)
-            throws CoreException {
+    private void relocate(IProject project, IFolder sourceFolder, String name,
+            boolean inRepository, File location, ProjectGrouping.SourceFolder source,
+            List<String> excluded, List<LinkedFolder> links) throws CoreException {
         IFolder relocated = project.getFolder(name + RELOCATED_SUFFIX);
         List<SourceRelocation.Misplaced> misplaced = session.getStore().peekMisplaced(source.path());
         if (misplaced == null) {
@@ -306,13 +462,22 @@ public class ProjectProvisioner {
             }
             // The links in there record which files were hidden last time; a file that is no
             // longer misplaced has to get its filter back off before the folder goes.
-            unhideAll(project.getFolder(name), location, relocated);
+            unhideAll(sourceFolder, location, relocated);
             relocated.delete(true, new NullProgressMonitor());
         }
         if (misplaced.isEmpty()) {
             return;
         }
-        relocated.create(IResource.NONE, true, new NullProgressMonitor());
+        if (inRepository) {
+            // A real companion folder would appear in the working copy; the links inside it live in
+            // the metadata area instead, same as the class output.
+            IPath target = metadataDirectory(project).append(relocated.getName());
+            target.toFile().mkdirs();
+            relocated.createLink(target, IResource.REPLACE | IResource.ALLOW_MISSING_LOCAL,
+                    new NullProgressMonitor());
+        } else {
+            relocated.create(IResource.NONE, true, new NullProgressMonitor());
+        }
 
         for (SourceRelocation.Misplaced file : misplaced) {
             IFolder target = relocated;
@@ -333,7 +498,7 @@ public class ProjectProvisioner {
             }
             link.createLink(new Path(new File(location, file.relativePath()).getAbsolutePath()),
                     IResource.ALLOW_MISSING_LOCAL, new NullProgressMonitor());
-            hide(project.getFolder(name), file);
+            hide(sourceFolder, file);
         }
         links.add(new LinkedFolder(relocated, source.test(), List.of()));
         relocatedFiles += misplaced.size();
@@ -436,7 +601,7 @@ public class ProjectProvisioner {
      */
     private void removeStaleLinks(IProject project, List<LinkedFolder> wanted)
             throws CoreException {
-        Set<String> keep = new LinkedHashSet<>();
+        Set<String> keep = new LinkedHashSet<>(OUTPUT_FOLDERS);
         wanted.forEach(link -> keep.add(link.folder().getName()));
         for (IResource member : project.members()) {
             if (member.getType() != IResource.FOLDER || keep.contains(member.getName())) {

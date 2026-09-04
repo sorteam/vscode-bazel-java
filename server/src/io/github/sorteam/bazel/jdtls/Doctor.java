@@ -77,6 +77,9 @@ final class Doctor {
         facts.add("workspace           : " + root);
         facts.add("bazel binary        : " + BazelBinary.resolve(session.getSettings()));
         facts.add("scope               : " + session.getSettings().universe());
+        facts.add("project layout      : " + (session.getSettings().isRepositoryLayout()
+                ? "repository (directories at the bazel packages; class output stays in metadata)"
+                : "metadata (nothing written to the working copy)"));
         facts.add("projects imported   : " + report.getProvisionedProjects());
 
         /*

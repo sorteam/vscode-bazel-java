@@ -10,6 +10,7 @@ const SETTINGS_KEYS = [
   "excludeTargets",
   "useBazelProject",
   "importMode",
+  "projectLayout",
   "maxProjects",
   "outputBase",
   "maxIdleSeconds",

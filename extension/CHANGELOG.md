@@ -1,5 +1,45 @@
 # Changelog
 
+## 0.7.1
+
+- **The classpath now carries the real maven jars, and this - not the project layout - is what makes
+  the Spring Boot Dashboard find the applications.** aquery reports what javac consumes, which for a maven dependency is bazel's header
+  jar - `header_spring-boot-4.0.7.jar` sitting next to the `spring-boot-4.0.7.jar` that
+  rules_jvm_external downloaded. The real jar is preferred wherever it exists: it has the class
+  bodies, so navigating into a library shows code instead of an ABI stub, and its file name is the
+  maven artifact name. The second part is what mattered here - the dashboard decides whether a
+  project is an application by looking for a classpath jar whose name starts with `spring-boot`, so
+  with header jars it found no applications anywhere, on a workspace whose projects, classpath and
+  index were all fine. Lombok had this substitution already; now every dependency does, guarded by
+  the file existing, so a target's own header jar is left as reported.
+
+  Expect one republish and reindex on the first import after upgrading: the classpath entries point
+  at different files.
+
+## 0.7.0
+
+- **New setting `bazelJava.projectLayout`, and with `repository` the Spring Tools indexer works.**
+  Generated projects have always lived in the language server's own storage, with the sources linked
+  in, so that nothing is written to the working copy. Parts of the java tooling assume the opposite -
+  that a project's location is inside the workspace folder - and quietly skip the projects where it
+  is not:
+  - the Spring Tools classpath bridge computes a source folder as *project location + entry path*,
+    hands its indexer a directory that does not exist, and indexes nothing at all - no symbols, no
+    beans, not even handwritten ones. Measured on a 116-project workspace: 228 of 244 source entries
+    pointed at directories that do not exist. This is what the setting is for;
+  - jdt.ls deletes such projects at startup, which 0.6.4 already works around by claiming them with
+    a build support;
+  - vscode-java-debug filters its main-class search by project location too, though the Spring Boot
+    Dashboard turns out not to depend on it: it asks with the project's own location rather than the
+    workspace folder.
+
+  `repository` puts each project's directory at the bazel package its targets come from. Class output
+  and the relocated-sources folders are still linked into the language server's storage, so the
+  working copy stays untouched. A project whose directory would contain another project's - or whose
+  sources are not inside its package - keeps the old layout, and the import report says how many did.
+  The default is unchanged; switching recreates the projects and costs one reindex.
+- `JBazel: Doctor` reports which layout is in effect.
+
 ## 0.6.5
 
 A follow-up to 0.6.4, from watching it run. Keeping the projects across a restart worked - workspace

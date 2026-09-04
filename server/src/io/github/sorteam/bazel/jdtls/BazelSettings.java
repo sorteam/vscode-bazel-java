@@ -42,6 +42,9 @@ public final class BazelSettings {
     public static final String IMPORT_MODE_EAGER = "eager";
     public static final String IMPORT_MODE_LAZY = "lazy";
 
+    public static final String PROJECT_LAYOUT_METADATA = "metadata";
+    public static final String PROJECT_LAYOUT_REPOSITORY = "repository";
+
     /* Keys that decide what gets executed, and are therefore never read from inside the repository. */
     private static final List<String> MACHINE_LEVEL_KEYS = List.of("binary", "outputBase");
 
@@ -52,6 +55,7 @@ public final class BazelSettings {
     private List<String> excludedPatterns = List.of();
     private boolean useBazelProject = true;
     private String importMode = IMPORT_MODE_LAZY;
+    private String projectLayout = PROJECT_LAYOUT_METADATA;
     private int maxProjects = 300;
     private String outputBase = "";
     private int maxIdleSeconds = 900;
@@ -104,6 +108,15 @@ public final class BazelSettings {
 
     public boolean isLazyImport() {
         return IMPORT_MODE_LAZY.equals(importMode);
+    }
+
+    /*
+        Where a generated project's directory is: in the language server's metadata (default,
+        nothing is written to the working copy) or inside the repository, next to the sources it
+        describes. See ProjectLocations for what the second one buys and what it costs.
+     */
+    public boolean isRepositoryLayout() {
+        return PROJECT_LAYOUT_REPOSITORY.equals(projectLayout);
     }
 
     public int getMaxProjects() {
@@ -218,7 +231,7 @@ public final class BazelSettings {
     public String fingerprint() {
         return String.join(" ",
                 binary, String.join(",", includedPatterns), String.join(",", excludedPatterns),
-                importMode, outputBase, String.valueOf(groupSourceRoots));
+                importMode, outputBase, String.valueOf(groupSourceRoots), projectLayout);
     }
 
     /*
@@ -260,6 +273,7 @@ public final class BazelSettings {
         excludedPatterns = strings(json, "excludeTargets", excludedPatterns);
         useBazelProject = bool(json, "useBazelProject", useBazelProject);
         importMode = string(json, "importMode", importMode);
+        projectLayout = string(json, "projectLayout", projectLayout);
         maxProjects = integer(json, "maxProjects", maxProjects);
         maxIdleSeconds = integer(json, "maxIdleSeconds", maxIdleSeconds);
         commandTimeoutSeconds = integer(json, "commandTimeoutSeconds", commandTimeoutSeconds);
@@ -340,6 +354,7 @@ public final class BazelSettings {
     private void readOverrides() {
         binary = override("binary", binary);
         importMode = override("importMode", importMode);
+        projectLayout = override("projectLayout", projectLayout);
         outputBase = override("outputBase", outputBase);
         maxProjects = integer(override("maxProjects", null), maxProjects);
         maxIdleSeconds = integer(override("maxIdleSeconds", null), maxIdleSeconds);
