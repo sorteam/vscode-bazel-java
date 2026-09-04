@@ -24,6 +24,13 @@
             class="io.github.sorteam.bazel.jdtls.BazelClasspathContainerInitializer"/>
    </extension>
    <extension
+         point="org.eclipse.jdt.launching.runtimeClasspathEntryResolvers">
+      <runtimeClasspathEntryResolver
+            id="bazelRuntimeClasspathResolver"
+            container="io.github.sorteam.bazel.jdtls.BAZEL_CONTAINER"
+            class="io.github.sorteam.bazel.jdtls.BazelRuntimeClasspathResolver"/>
+   </extension>
+   <extension
          point="org.eclipse.jdt.ls.core.delegateCommandHandler">
       <delegateCommandHandler class="io.github.sorteam.bazel.jdtls.BazelCommandHandler">
          <command id="jbazel.refreshClasspath"/>

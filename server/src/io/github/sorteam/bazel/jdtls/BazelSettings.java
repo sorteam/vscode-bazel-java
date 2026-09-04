@@ -56,6 +56,7 @@ public final class BazelSettings {
     private boolean useBazelProject = true;
     private String importMode = IMPORT_MODE_LAZY;
     private String projectLayout = PROJECT_LAYOUT_METADATA;
+    private boolean runtimeClasspath = true;
     private int maxProjects = 300;
     private String outputBase = "";
     private int maxIdleSeconds = 900;
@@ -117,6 +118,17 @@ public final class BazelSettings {
      */
     public boolean isRepositoryLayout() {
         return PROJECT_LAYOUT_REPOSITORY.equals(projectLayout);
+    }
+
+    /*
+        Whether runtime_deps join the project's classpath. They are not inputs to javac, so the
+        Javac action cannot report them, and without them an application launched from the IDE runs
+        with a classpath bazel would never use - see RuntimeClasspath. The trade is that JDT has one
+        classpath per project: code written against a runtime-only dependency then compiles in the
+        editor and fails in the build.
+     */
+    public boolean isRuntimeClasspath() {
+        return runtimeClasspath;
     }
 
     public int getMaxProjects() {
@@ -231,7 +243,8 @@ public final class BazelSettings {
     public String fingerprint() {
         return String.join(" ",
                 binary, String.join(",", includedPatterns), String.join(",", excludedPatterns),
-                importMode, outputBase, String.valueOf(groupSourceRoots), projectLayout);
+                importMode, outputBase, String.valueOf(groupSourceRoots), projectLayout,
+                String.valueOf(runtimeClasspath));
     }
 
     /*
@@ -274,6 +287,7 @@ public final class BazelSettings {
         useBazelProject = bool(json, "useBazelProject", useBazelProject);
         importMode = string(json, "importMode", importMode);
         projectLayout = string(json, "projectLayout", projectLayout);
+        runtimeClasspath = bool(json, "runtimeClasspath", runtimeClasspath);
         maxProjects = integer(json, "maxProjects", maxProjects);
         maxIdleSeconds = integer(json, "maxIdleSeconds", maxIdleSeconds);
         commandTimeoutSeconds = integer(json, "commandTimeoutSeconds", commandTimeoutSeconds);

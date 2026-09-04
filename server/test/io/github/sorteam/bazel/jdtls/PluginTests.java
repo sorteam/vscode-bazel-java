@@ -40,6 +40,7 @@ public final class PluginTests {
         gitStateSeesCheckoutRebaseAndWorktrees();
         containerStampTracksJarsOrderAndModification();
         partialAqueryKeepsPopulatedClasspaths();
+        runtimeClasspathParsesCqueryAndWidensTheCompileClasspath();
         failureGateBusyWindowDoesNotEscalate();
         watchdogKillsASilentProcess();
         busyServerIsClassifiedAsBusyNotAsFailure();
@@ -500,6 +501,57 @@ public final class PluginTests {
                 List.of("new.jar").equals(resolved.get("//c:lib")), String.valueOf(resolved));
     }
 
+    /*
+        runtime_deps are not inputs to javac, so the Javac action this plugin reads cannot mention
+        them: a jdbc driver declared there is missing from the classpath the IDE hands to a launch
+        configuration, and the application dies on startup while bazel run works. cquery answers
+        with the runtime closure; this is the shape of its answer.
+     */
+    private static void runtimeClasspathParsesCqueryAndWidensTheCompileClasspath() {
+        List<String> output = List.of(
+                "@@//services/post/src/main:library\tbazel-out/bin/liblibrary.jar"
+                        + "\tbazel-out/bin/external/maven/processed_postgresql-42.7.11.jar",
+                "@//jobs/report/src/main:library\tbazel-out/bin/libreport.jar",
+                "",
+                "INFO: Found 3 targets...",
+                "@@rules_jvm_external++maven+maven//:postgresql\tbazel-out/bin/whatever.jar",
+                "@@//platform/empty:library");
+
+        Map<String, List<String>> parsed = RuntimeClasspath.parse(output);
+        check("a canonical label is reduced to the one this plugin uses",
+                parsed.containsKey("//services/post/src/main:library"), parsed.keySet().toString());
+        check("and so is the single-at form",
+                parsed.containsKey("//jobs/report/src/main:library"), parsed.keySet().toString());
+        check("the runtime jars come with it",
+                parsed.get("//services/post/src/main:library").size() == 2,
+                parsed.get("//services/post/src/main:library").toString());
+        check("a target of another repository belongs to nobody here", parsed.size() == 2,
+                parsed.keySet().toString());
+        check("bazel's own output lines are not mistaken for targets",
+                parsed.keySet().stream().noneMatch(label -> label.startsWith("INFO")),
+                parsed.keySet().toString());
+
+        List<String> compile = List.of("bazel-out/bin/liblibrary.jar", "bazel-out/bin/spring.jar");
+        List<String> merged = RuntimeClasspath.merge(compile,
+                parsed.get("//services/post/src/main:library"));
+        check("merging keeps the compile classpath first and in order",
+                merged.get(0).equals("bazel-out/bin/liblibrary.jar")
+                        && merged.get(1).equals("bazel-out/bin/spring.jar"),
+                merged.toString());
+        check("adds the runtime-only jar once",
+                merged.size() == 3 && merged.contains(
+                        "bazel-out/bin/external/maven/processed_postgresql-42.7.11.jar"),
+                merged.toString());
+        check("and a label with nothing to add is left as it was",
+                RuntimeClasspath.merge(compile, List.of()).equals(compile),
+                RuntimeClasspath.merge(compile, List.of()).toString());
+
+        check("the starlark script finds JavaInfo by the stable part of its key",
+                RuntimeClasspath.starlarkScript().contains("k.endswith('%JavaInfo')")
+                        && RuntimeClasspath.starlarkScript().contains("transitive_runtime_jars"),
+                RuntimeClasspath.starlarkScript());
+    }
+
     private static void failureGateBusyWindowDoesNotEscalate() {
         FailureGate gate = new FailureGate("test", 300);
         gate.recordBusy("terminal build");
@@ -916,9 +968,45 @@ public final class PluginTests {
                 BazelClasspathContainer.jarFile(root.toFile(), "header_spring-boot-4.0.7.jar")
                         .getName());
 
-        /* A header jar with nothing beside it - a target's own hjar - stays as aquery reported it. */
+        /*
+            The repository's own targets get an ABI jar under a different name - ijar and turbine
+            write "-ijar.jar" and "-hjar.jar" - and missing this one is not a cosmetic problem: the
+            class loader refuses a stripped class outright with "Absent Code attribute", so an
+            application launched from the IDE dies on the first class it needs.
+         */
+        Files.writeString(root.resolve("liblibrary-ijar.jar"), "abi");
+        Files.writeString(root.resolve("liblibrary.jar"), "classes and resources");
+        Files.writeString(root.resolve("liblibrary-class.jar"), "classes");
+        check("an ijar resolves to the library jar, resources included",
+                "liblibrary.jar".equals(BazelClasspathContainer
+                        .jarFile(root.toFile(), "liblibrary-ijar.jar").getName()),
+                BazelClasspathContainer.jarFile(root.toFile(), "liblibrary-ijar.jar").getName());
+
+        Files.writeString(root.resolve("libother-hjar.jar"), "abi");
+        Files.writeString(root.resolve("libother-class.jar"), "classes");
+        check("and to the javac output when that is all there is",
+                "libother-class.jar".equals(BazelClasspathContainer
+                        .jarFile(root.toFile(), "libother-hjar.jar").getName()),
+                BazelClasspathContainer.jarFile(root.toFile(), "libother-hjar.jar").getName());
+
+        /*
+            ijar over the jars of an external repository mirrors the original path under _ijar, so
+            the repository name shows up twice and the original lives outside the mirror.
+         */
+        Path repository = Files.createDirectories(root.resolve("external/+tomcat+tomcat/lib"));
+        Files.writeString(repository.resolve("catalina.jar"), "classes");
+        String mirrored = "bazel-out/k8-fastbuild/bin/external/+tomcat+tomcat/_ijar/lib"
+                + "/+tomcat+tomcat/lib/catalina-ijar.jar";
+        Files.createDirectories(root.resolve(mirrored).getParent());
+        Files.writeString(root.resolve(mirrored), "abi");
+        check("an ijar mirror resolves to the jar the repository shipped",
+                repository.resolve("catalina.jar").toFile()
+                        .equals(BazelClasspathContainer.jarFile(root.toFile(), mirrored)),
+                BazelClasspathContainer.jarFile(root.toFile(), mirrored).toString());
+
+        /* An ABI jar with nothing beside it stays as aquery reported it. */
         Files.writeString(root.resolve("header_liblocal-hjar.jar"), "abi");
-        check("a header jar without a counterpart is left alone",
+        check("an ABI jar without a counterpart is left alone",
                 "header_liblocal-hjar.jar".equals(BazelClasspathContainer
                         .jarFile(root.toFile(), "header_liblocal-hjar.jar").getName()),
                 BazelClasspathContainer.jarFile(root.toFile(), "header_liblocal-hjar.jar")

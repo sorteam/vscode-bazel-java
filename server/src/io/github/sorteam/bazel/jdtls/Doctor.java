@@ -77,6 +77,9 @@ final class Doctor {
         facts.add("workspace           : " + root);
         facts.add("bazel binary        : " + BazelBinary.resolve(session.getSettings()));
         facts.add("scope               : " + session.getSettings().universe());
+        facts.add("runtime classpath   : " + (session.getSettings().isRuntimeClasspath()
+                ? "on (runtime_deps are on the project classpath)"
+                : "off (compile classpath only; an IDE launch may miss runtime_deps)"));
         facts.add("project layout      : " + (session.getSettings().isRepositoryLayout()
                 ? "repository (directories at the bazel packages; class output stays in metadata)"
                 : "metadata (nothing written to the working copy)"));

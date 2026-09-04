@@ -11,6 +11,7 @@ const SETTINGS_KEYS = [
   "useBazelProject",
   "importMode",
   "projectLayout",
+  "runtimeClasspath",
   "maxProjects",
   "outputBase",
   "maxIdleSeconds",

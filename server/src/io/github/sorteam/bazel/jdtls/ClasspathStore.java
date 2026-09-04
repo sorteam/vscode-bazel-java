@@ -33,12 +33,15 @@ import com.google.gson.JsonParser;
 public final class ClasspathStore {
 
     /*
+        Bumped to 8 when the runtime jars moved out of "classpath" into their own map: a cache
+        written by 0.8.0 has them merged in, and there is no telling the two apart afterwards.
+
         Not bumped for the published-stamp map: a cache written by an older version simply has no
         "published" object, which reads as "nothing published yet" and costs one republish, while a
         version bump would throw away the discovery and the resolved jars too - a cold bazel query
         and a full aquery warm on the first start after every upgrade.
      */
-    private static final int FORMAT_VERSION = 7;
+    private static final int FORMAT_VERSION = 8;
     private static final Map<String, ClasspathStore> STORES = new ConcurrentHashMap<>();
 
     private final File root;
@@ -60,6 +63,12 @@ public final class ClasspathStore {
         truncated.
      */
     private final Map<String, Long> publishedStamps = new LinkedHashMap<>();
+
+    /*
+        The jars a label needs to run, kept apart from the ones it needs to compile. They must not
+        go into the project's classpath - see BazelRuntimeClasspathResolver for where they do go.
+     */
+    private final Map<String, List<String>> runtimeJarsByLabel = new LinkedHashMap<>();
 
     private String executionRoot = "";
     private String settingsFingerprint = "";
@@ -103,6 +112,7 @@ public final class ClasspathStore {
             readMisplaced(json.getAsJsonObject("misplaced"));
             readClasspath(json.getAsJsonObject("classpath"));
             readPublishedStamps(json.getAsJsonObject("published"));
+            readInto(json.getAsJsonObject("runtime"), runtimeJarsByLabel);
             BazelLog.info(String.format(
                     "JBazel: loaded cached import for %s (%d targets, %d classpaths)",
                     root.getName(), discovery.size(), jarsByLabel.size()));
@@ -132,6 +142,17 @@ public final class ClasspathStore {
             publishedStamps.clear();
             dirty = true;
         }
+    }
+
+    public synchronized List<String> peekRuntimeJars(String label) {
+        load();
+        return runtimeJarsByLabel.get(label);
+    }
+
+    public synchronized void putRuntimeJars(Map<String, List<String>> jars) {
+        load();
+        runtimeJarsByLabel.putAll(jars);
+        dirty = true;
     }
 
     public synchronized List<String> peekJars(String label) {
@@ -245,6 +266,7 @@ public final class ClasspathStore {
 
     public synchronized void invalidate() {
         jarsByLabel.clear();
+        runtimeJarsByLabel.clear();
         discovery.clear();
         publishedStamps.clear();
         buildFilesDigest = "";
@@ -294,6 +316,14 @@ public final class ClasspathStore {
             misplacedJson.add(sourceRoot, array);
         });
         json.add("misplaced", misplacedJson);
+
+        JsonObject runtime = new JsonObject();
+        runtimeJarsByLabel.forEach((label, jars) -> {
+            JsonArray array = new JsonArray(jars.size());
+            jars.forEach(array::add);
+            runtime.add(label, array);
+        });
+        json.add("runtime", runtime);
 
         JsonObject published = new JsonObject();
         publishedStamps.forEach(published::addProperty);
@@ -367,14 +397,18 @@ public final class ClasspathStore {
     }
 
     private void readClasspath(JsonObject object) {
-        jarsByLabel.clear();
+        readInto(object, jarsByLabel);
+    }
+
+    private static void readInto(JsonObject object, Map<String, List<String>> into) {
+        into.clear();
         if (object == null) {
             return;
         }
         object.entrySet().forEach(entry -> {
             List<String> jars = new ArrayList<>();
             entry.getValue().getAsJsonArray().forEach(jar -> jars.add(jar.getAsString()));
-            jarsByLabel.put(entry.getKey(), List.copyOf(jars));
+            into.put(entry.getKey(), List.copyOf(jars));
         });
     }
 

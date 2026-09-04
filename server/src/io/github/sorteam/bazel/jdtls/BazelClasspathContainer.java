@@ -116,40 +116,81 @@ public class BazelClasspathContainer implements IClasspathContainer {
      */
     static File jarFile(File executionRoot, String jar) {
         File file = jar.startsWith("/") ? new File(jar) : new File(executionRoot, jar);
-        String name = file.getName();
-        /*
-            aquery reports what javac consumes, and for a maven dependency that is bazel's header
-            jar - "header_spring-boot-4.0.7.jar" next to the real "spring-boot-4.0.7.jar" that
-            rules_jvm_external downloaded. The real one is preferred wherever it exists, for two
-            reasons.
-
-            It has the class bodies, so navigating into a library shows code rather than an ABI
-            stub. And its file name is the maven artifact name, which tooling reads: the Spring Boot
-            Dashboard decides whether a project is an application by looking for a classpath jar
-            whose name starts with "spring-boot", so with header jars it finds no applications
-            anywhere. That was the whole reason the dashboard stayed empty on a workspace where the
-            projects, the classpath and the index were all fine.
-
-            The check is by existence, so a header jar with no counterpart - a target's own hjar,
-            anything a rule generated - is left exactly as aquery reported it. Lombok was the first
-            case of this and is now just one of them: its header jar carries no annotation
-            processor, and javac on the IDE side needs the real one.
-         */
-        if (name.startsWith("header_") && name.endsWith(".jar")) {
-            File full = new File(file.getParentFile(), name.substring("header_".length()));
-            if (full.isFile()) {
-                return full;
-            }
-        }
-        return file;
+        File full = fullJarFor(executionRoot, jar, file);
+        return full == null ? file : full;
     }
 
     /*
-        Package-private so that ContainerStamp can stamp exactly what lands in the container: the
-        source attachment is part of a container's content, so a source jar appearing next to a jar
-        that is otherwise untouched has to count as a change. Without that, sources downloaded after
-        the fact stay invisible until the window is reloaded.
+        The real jar behind an ABI jar, or null when there is none to be found.
+
+        aquery reports what javac consumes, and that is an ABI jar: bazel's ijar or turbine strips
+        every method body, keeping only signatures. It is enough to compile against and it is not
+        enough to run: a class loaded from one dies with "ClassFormatError: Absent Code attribute in
+        method that is not native or abstract", which is what a launch configuration built from this
+        classpath hits the moment the application starts. The names differ by producer -
+        "header_spring-boot-4.0.7.jar" for a maven dependency, "liblibrary-ijar.jar" for a target of
+        the repository itself - and the real jar sits next to the stripped one under the name without
+        the marker.
+
+        Preferring it also means navigating into a library shows code instead of empty stubs, and
+        that the file name is the maven artifact name, which other tooling reads: the Spring Boot
+        Dashboard decides whether a project is an application by looking for a classpath jar whose
+        name starts with "spring-boot".
+
+        Every candidate is checked on disk, so an ABI jar with no counterpart - and there are such -
+        stays exactly as aquery reported it.
      */
+    private static File fullJarFor(File executionRoot, String jar, File file) {
+        String name = file.getName();
+        String base = null;
+        if (name.startsWith("header_") && name.endsWith(".jar")) {
+            base = name.substring("header_".length(), name.length() - ".jar".length());
+        } else if (name.endsWith("-ijar.jar")) {
+            base = name.substring(0, name.length() - "-ijar.jar".length());
+        } else if (name.endsWith("-hjar.jar")) {
+            base = name.substring(0, name.length() - "-hjar.jar".length());
+        }
+        if (base == null) {
+            return null;
+        }
+        /*
+            <base>.jar is a java_library's output with its resources merged in, <base>-class.jar the
+            javac output before that merge. The first is what bazel itself would put on a runtime
+            classpath, so it goes first.
+         */
+        for (String candidate : List.of(base + ".jar", base + "-class.jar")) {
+            File sibling = new File(file.getParentFile(), candidate);
+            if (sibling.isFile()) {
+                return sibling;
+            }
+        }
+        return outsideTheIjarMirror(executionRoot, jar, base);
+    }
+
+    /*
+        ijar run over the jars of an external repository - java_import over a downloaded
+        distribution - writes into <repo>/_ijar/<package>/<repo>/<path inside the repository>, a
+        mirror of where the original came from. The repository name therefore appears twice, and the
+        tail after its last occurrence is the path to the original inside that repository.
+     */
+    private static File outsideTheIjarMirror(File executionRoot, String jar, String base) {
+        int mirror = jar.indexOf("/_ijar/");
+        if (mirror < 0 || jar.startsWith("/")) {
+            return null;
+        }
+        String head = jar.substring(0, mirror);
+        String repository = head.substring(head.lastIndexOf('/') + 1);
+        int tail = jar.lastIndexOf(repository + "/");
+        if (repository.isEmpty() || tail <= mirror) {
+            return null;
+        }
+        String inside = jar.substring(tail + repository.length() + 1);
+        int slash = inside.lastIndexOf('/');
+        File original = new File(executionRoot, "external/" + repository + "/"
+                + inside.substring(0, slash + 1) + base + ".jar");
+        return original.isFile() ? original : null;
+    }
+
     static File sourcesFor(File jar) {
         String name = jar.getName();
         String base = name.startsWith("header_") ? name.substring("header_".length()) : name;

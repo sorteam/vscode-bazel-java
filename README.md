@@ -157,6 +157,21 @@ repository.
 no longer a workspace folder; what is otherwise stale is decided against the current target list by
 [ProjectProvisioner](server/src/io/github/sorteam/bazel/jdtls/ProjectProvisioner.java).
 
+**The classpath describes running as well as compiling.** aquery reports what javac consumes, which
+is the compile classpath: `runtime_deps` are not inputs to javac, so a jdbc driver declared there
+never reached the IDE and an application launched from it died on startup while `bazel run` worked.
+[RuntimeClasspath](server/src/io/github/sorteam/bazel/jdtls/RuntimeClasspath.java) asks `bazel cquery`
+for `JavaInfo.transitive_runtime_jars` - analysis, no actions, one call for every label - and
+[BazelRuntimeClasspathResolver](server/src/io/github/sorteam/bazel/jdtls/BazelRuntimeClasspathResolver.java)
+hands that answer to launches through `org.eclipse.jdt.launching.runtimeClasspathEntryResolvers`, the
+seam m2e uses to keep maven scopes apart. The project's own classpath stays compile-only: putting the
+runtime closure in it took a 116-project workspace from 67k classpath entries to 106k and the language
+server's heap to 12 GB, and made the editor accept code the build rejects. The jars aquery names are also
+bazel's ABI jars, stripped of method bodies; the real artifact next to each one is preferred instead
+([BazelClasspathContainer.jarFile](server/src/io/github/sorteam/bazel/jdtls/BazelClasspathContainer.java)),
+because a stripped class does not load at all and because tooling reads jar names - the Spring Boot
+Dashboard decides a project is an application by finding a `spring-boot*.jar` on it.
+
 **Two project layouts, because the ecosystem assumes the second one.** Generated projects live in the
 language server's metadata area by default, with the sources linked in, so nothing is written to the
 working copy. Parts of the java tooling assume a project's location is inside the workspace folder and

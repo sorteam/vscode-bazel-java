@@ -212,6 +212,18 @@ public class BazelWorkspace {
         names every java label explicitly (~17.6 KB for a 442-target monorepo), which is well past
         what belongs on a command line.
      */
+    /* Same idea as writeQueryFile, for a --starlark:file that cannot be passed on a command line. */
+    public Path writeStarlarkFile(String script) throws CoreException {
+        try {
+            Path file = Files.createTempFile("bazel-jdtls-starlark", ".bzl");
+            file.toFile().deleteOnExit();
+            Files.writeString(file, script, StandardCharsets.UTF_8);
+            return file;
+        } catch (IOException e) {
+            throw new CoreException(error("Unable to write bazel starlark file", e));
+        }
+    }
+
     public Path writeQueryFile(String expression) throws CoreException {
         try {
             Path file = Files.createTempFile("bazel-jdtls-query", ".txt");

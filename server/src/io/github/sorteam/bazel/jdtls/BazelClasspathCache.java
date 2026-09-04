@@ -44,12 +44,16 @@ public final class BazelClasspathCache {
     private final BazelSession session;
     private final Map<String, List<String>> jarsByLabel = new HashMap<>();
 
+    /* Kept apart from the compile classpath on purpose - see BazelRuntimeClasspathResolver. */
+    private final Map<String, List<String>> runtimeJarsByLabel = new HashMap<>();
+
     BazelClasspathCache(BazelSession session) {
         this.session = session;
     }
 
     public synchronized void clear() {
         jarsByLabel.clear();
+        runtimeJarsByLabel.clear();
     }
 
     /*
@@ -200,6 +204,8 @@ public final class BazelClasspathCache {
                             unanalysedLabels.size(), named, failure.getMessage()));
         }
 
+        resolveRuntimeJars(pending, monitor);
+
         if (force) {
             int kept = dropEmptiesThatWerePopulated(resolved, this::previousJars);
             if (kept > 0) {
@@ -218,6 +224,80 @@ public final class BazelClasspathCache {
                 resolved.size(), elapsed, withJars));
         session.getReport().phase("classpath", elapsed);
         return resolved;
+    }
+
+    /*
+        What the targets need to *run*, resolved and stored next to - never inside - the compile
+        classpath.
+
+        runtime_deps are not inputs to javac, so the Javac action cannot mention them, and an
+        application launched from the IDE was starting without its jdbc driver. 0.8.0 fixed that by
+        merging the runtime closure into the project's classpath, and that was the wrong place: on a
+        116-project workspace it took the classpath from 67k entries to 106k and the language
+        server's heap to 12 GB, and it also made the editor accept code the build would reject,
+        since JDT has one classpath per project. The jars are handed to launches only, through
+        BazelRuntimeClasspathResolver.
+
+        Separate pass, and a cheap one: cquery needs analysis but no actions, one call covers every
+        label, and a failure here costs nothing but the launch classpath.
+     */
+    private void resolveRuntimeJars(List<String> labels, IProgressMonitor monitor) {
+        if (!session.getSettings().isRuntimeClasspath() || labels.isEmpty()) {
+            return;
+        }
+        long started = System.currentTimeMillis();
+        List<String> lines = new ArrayList<>();
+        try {
+            BazelWorkspace workspace = session.getWorkspace();
+            Path queryFile = workspace.writeQueryFile("set(" + String.join(" ", labels) + ")");
+            Path scriptFile = workspace.writeStarlarkFile(RuntimeClasspath.starlarkScript());
+            workspace.runStreaming(monitor, lines::add, "cquery",
+                    "--query_file=" + queryFile,
+                    "--output=starlark",
+                    "--starlark:file=" + scriptFile,
+                    "--noshow_progress", "--keep_going", "--ui_event_filters=-info");
+        } catch (CoreException e) {
+            BazelLog.warnOnce("runtime-classpath:" + session.getWorkspace().getRoot().getName(),
+                    "JBazel: could not read the runtime classpath (" + e.getMessage()
+                            + "); compilation is unaffected, but an application launched from the"
+                            + " IDE may miss its runtime_deps");
+            return;
+        }
+
+        Map<String, List<String>> runtime = RuntimeClasspath.parse(lines);
+        if (runtime.isEmpty()) {
+            return;
+        }
+        synchronized (this) {
+            runtimeJarsByLabel.putAll(runtime);
+        }
+        session.getStore().putRuntimeJars(runtime);
+        BazelLog.info(String.format(
+                "JBazel: runtime classpath for %d label(s) in %d ms (launches only, not the"
+                        + " project classpath)",
+                runtime.size(), System.currentTimeMillis() - started));
+    }
+
+    /*
+        The runtime jars of a label, or an empty list when none are known - a cache written before
+        this existed, a repository where the query failed, or the setting turned off. Never runs
+        bazel: a launch must not wait on it.
+     */
+    public List<String> peekRuntimeJars(String label) {
+        synchronized (this) {
+            List<String> known = runtimeJarsByLabel.get(label);
+            if (known != null) {
+                return known;
+            }
+        }
+        List<String> stored = session.getStore().peekRuntimeJars(label);
+        if (stored == null) {
+            return List.of();
+        }
+        synchronized (this) {
+            runtimeJarsByLabel.putIfAbsent(label, stored);
+        }
+        return stored;
     }
 
     /* At most a handful of labels in one line, with a count for the rest. */

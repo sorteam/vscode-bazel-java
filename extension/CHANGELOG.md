@@ -1,5 +1,59 @@
 # Changelog
 
+## 0.8.1
+
+- **The runtime jars are handed to launches instead of being put on the project's classpath.** 0.8.0
+  merged them into the classpath, which fixed launching and broke two other things: on a
+  116-project workspace the classpath went from 67k entries to 106k, the language server's heap with
+  it (12 GB measured), and the editor began accepting code the build rejects, since JDT has one
+  classpath per project and no runtime scope.
+
+  JDT has the seam for exactly this - `org.eclipse.jdt.launching.runtimeClasspathEntryResolvers`,
+  the mechanism m2e uses to keep maven scopes apart - so the container stays compile-only and the
+  runtime jars exist only in the answer given to a launch. Compilation mirrors the build again,
+  memory returns to where it was, and an application still starts with its `runtime_deps`.
+
+  The import cache format changed with it (runtime jars now live in their own map), so the first
+  import after upgrading re-runs discovery once.
+
+## 0.8.0
+
+- **`runtime_deps` are on the classpath now, so an application launched from the IDE runs with the
+  jars bazel would give it.** Everything here reads the classpath off the Javac action, which
+  describes compilation exactly and cannot describe running: `runtime_deps` are not inputs to javac.
+  A jdbc driver, a logging backend or a flyway module declared there was simply absent, so the
+  application died on startup while `bazel run` worked. A second pass asks `bazel cquery` for
+  `JavaInfo.transitive_runtime_jars` - analysis, no actions, one call for every label at once - and
+  merges the answer into the classpath, compile entries first.
+
+  Measured on a 116-project repository: about a second for the query, and for one service 241
+  runtime jars including the postgres driver that its `runtime_deps` declares. A failure of that
+  query leaves the compile classpath untouched and says so once; an import that finishes matters
+  more than a launch that works.
+
+  `bazelJava.runtimeClasspath: false` turns it off. The trade it makes: JDT has one classpath per
+  project, so with runtime jars on it, code written against a runtime-only dependency compiles in
+  the editor and fails in the build.
+- `JBazel: Doctor` reports whether the runtime classpath is on.
+
+## 0.7.2
+
+- **Running an application from the Spring Boot Dashboard no longer dies with `ClassFormatError`.**
+  0.7.1 replaced bazel's `header_*.jar` ABI jars with the real maven artifacts, but the repository's
+  own targets get an ABI jar under a different name - ijar and turbine write `liblibrary-ijar.jar`
+  and `-hjar.jar` - and those were still going onto the classpath. An ABI jar has signatures and no
+  method bodies, which compiles fine and refuses to load: `Absent Code attribute in method that is
+  not native or abstract`, on the first class the application needs. Both names are now resolved to
+  the real jar next to them (`liblibrary.jar`, resources included, or the `-class.jar` javac output),
+  and for an ijar of an external repository's own jars - `java_import` over a downloaded
+  distribution - to the file that repository shipped, found through the `_ijar` path mirror.
+
+  Measured on a 116-project workspace: of 1842 distinct classpath entries, 1382 were ABI jars and
+  all 1382 now resolve to a real jar. Each candidate is checked on disk, so an ABI jar with no
+  counterpart is still passed through as aquery reported it.
+
+  Expect one republish and reindex on the first import after upgrading.
+
 ## 0.7.1
 
 - **The classpath now carries the real maven jars, and this - not the project layout - is what makes
