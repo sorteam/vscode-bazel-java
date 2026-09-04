@@ -12,6 +12,8 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
 
+import org.eclipse.core.resources.ResourcesPlugin;
+import org.eclipse.core.runtime.IPath;
 import org.eclipse.jdt.ls.core.internal.JavaLanguageServerPlugin;
 import org.eclipse.jdt.ls.core.internal.preferences.PreferenceManager;
 
@@ -44,6 +46,9 @@ final class Doctor {
             "node_modules", ".venv", "venv", "vendor", ".yarn", ".pnpm-store", ".nuget");
 
     private static final long GIGABYTE = 1024L * 1024 * 1024;
+
+    /* Enough of the log to hold a recurring failure, small enough to read on every report. */
+    private static final int LOG_TAIL_BYTES = 256 * 1024;
 
     private Doctor() {
     }
@@ -172,7 +177,94 @@ final class Doctor {
         }
 
         problems.addAll(bazelrcProblems(root, facts));
+        problems.addAll(indexProblems(metadataDirectory(), facts));
         return format(problems, facts);
+    }
+
+    /*
+        The language server's .metadata directory, or null when the workspace has no location on
+        disk. This is where JDT keeps its index cache, which is the one piece of state that can turn
+        a healthy repository into an unusable one.
+     */
+    private static Path metadataDirectory() {
+        IPath location = ResourcesPlugin.getWorkspace().getRoot().getLocation();
+        return location == null ? null : location.toFile().toPath().resolve(".metadata");
+    }
+
+    /*
+        The JDT index cache, and the one failure of it that reads like a bug in this extension.
+
+        A language server that is killed while saving an index leaves the file half written. JDT
+        reads a length field out of it later, gets a garbage number, tries to allocate an array that
+        size and dies with OutOfMemoryError - measured on this failure: "Failed to read index data
+        ... at offset 8600 and size 1936028278" on a 16 GB heap. It recovers by deleting the file and
+        reindexing, but the report is worth having: raising -Xmx does nothing, and the whole cache is
+        derived data that can simply be deleted.
+
+        Two signals, both cheap: a leftover .index.tmp is an interrupted write, and the failure
+        itself is in the language server's own log. Only the tail of that log is read - the message
+        recurs for as long as the problem exists, so the tail is where it will be.
+     */
+    static List<String> indexProblems(Path metadata, List<String> facts) {
+        List<String> problems = new ArrayList<>();
+        if (metadata == null) {
+            return problems;
+        }
+        Path indexes = metadata.resolve(".plugins/org.eclipse.jdt.core");
+        if (!Files.isDirectory(indexes)) {
+            return problems;
+        }
+        long bytes = 0;
+        int files = 0;
+        int halfWritten = 0;
+        try (var stream = Files.newDirectoryStream(indexes)) {
+            for (Path entry : stream) {
+                String name = entry.getFileName().toString();
+                if (name.endsWith(".index")) {
+                    files++;
+                    bytes += entry.toFile().length();
+                } else if (name.endsWith(".index.tmp")) {
+                    halfWritten++;
+                }
+            }
+        } catch (IOException e) {
+            facts.add("jdt index unreadable: " + indexes + " (" + e.getMessage() + ")");
+            return problems;
+        }
+        facts.add(String.format("jdt index          : %d files, %.1f GB in %s", files,
+                bytes / (double) GIGABYTE, indexes.getFileName()));
+
+        boolean corrupt = logMentionsCorruptIndex(metadata.resolve(".log"));
+        if (corrupt || halfWritten > 0) {
+            problems.add((corrupt
+                    ? "The language server log reports an unreadable JDT index"
+                    : halfWritten + " half-written JDT index file(s) are left over")
+                    + ", which is how a\n"
+                    + "      language server killed mid-save shows up. JDT reads a length out of a"
+                    + " truncated index,\n"
+                    + "      allocates that much and dies with OutOfMemoryError - raising -Xmx does"
+                    + " not help. The\n"
+                    + "      whole directory is derived data: close the window, delete\n"
+                    + "        " + indexes + "\n"
+                    + "      and reopen. Expect one full reindex.");
+        }
+        return problems;
+    }
+
+    /* Bounded: only the last stretch of the log, which is where a recurring failure lives. */
+    private static boolean logMentionsCorruptIndex(Path log) {
+        if (!Files.isRegularFile(log)) {
+            return false;
+        }
+        try (java.io.RandomAccessFile handle = new java.io.RandomAccessFile(log.toFile(), "r")) {
+            long from = Math.max(0, handle.length() - LOG_TAIL_BYTES);
+            handle.seek(from);
+            byte[] tail = new byte[(int) Math.min(LOG_TAIL_BYTES, handle.length() - from)];
+            handle.readFully(tail);
+            return new String(tail, StandardCharsets.UTF_8).contains("Failed to read index data");
+        } catch (IOException e) {
+            return false;
+        }
     }
 
     /*

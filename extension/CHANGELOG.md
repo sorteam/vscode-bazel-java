@@ -1,5 +1,43 @@
 # Changelog
 
+## 0.6.5
+
+A follow-up to 0.6.4, from watching it run. Keeping the projects across a restart worked - workspace
+initialization went from 5.3 s to 182 ms and the language server's build jobs from five minutes to
+two seconds - but it exposed the next thing in the chain.
+
+- **A restart no longer republishes every classpath container.** The guard that skips republishing an
+  identical container lived only in memory, and it was seeded when JDT asked this extension to
+  initialise a container. Now that the projects survive, JDT restores their containers from its own
+  state and never asks - so a fresh session knew nothing and republished all of them, which makes JDT
+  drop and re-index every jar behind them. The stamps are persisted with the rest of the import cache
+  now, and a publish is skipped only when the stamp matches *and* JDT still holds that exact
+  container.
+- **`JBazel: Doctor` reports a corrupt JDT index.** This is what a mass reindex can run into: a
+  language server killed mid-save leaves a half-written index file, JDT later reads a length out of it
+  (`Failed to read index data ... size 1936028278`), allocates that much and dies with
+  `OutOfMemoryError` - on any heap, repeatedly, with nothing wrong in the repository and no setting
+  that helps. The report now names the index directory, says it is derived data, and tells you to
+  delete it and reopen the window.
+
+## 0.6.4
+
+Startup performance. Both findings come from reading the language server's own log on a 116-project
+repository, where every window reload rebuilt the workspace from nothing.
+
+- **The generated projects survive a restart.** jdt.ls deletes any project whose location is not
+  inside a workspace folder unless a build support claims it, and nothing claimed these - so all 116
+  were deleted and recreated on every start, and each deletion took that project's JDT index with
+  it. The reload then re-indexed the whole repository: minutes of CPU on a workspace that had not
+  changed. The extension now contributes a build support that claims its own projects, and removes
+  them only when the repository they came from is no longer a workspace folder.
+- **A classpath build no longer re-imports the repository.** `bazelJava.buildOnImport` builds the
+  classpath targets after the import, and a build that rewrote any jar forced a full discovery
+  refresh: another `bazel query`, another aquery over every label, and a re-provision of every
+  project - about 30 s of work after every start. A build cannot change the project layout, so the
+  containers whose jars actually changed are now republished directly, and the cheap digest check
+  still catches a `BUILD` or lock-file edit.
+
 ## 0.6.3
 
 - **A settings change no longer drops the fence.** The language server does not edit its preferences

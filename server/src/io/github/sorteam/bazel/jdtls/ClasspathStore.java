@@ -32,6 +32,12 @@ import com.google.gson.JsonParser;
  */
 public final class ClasspathStore {
 
+    /*
+        Not bumped for the published-stamp map: a cache written by an older version simply has no
+        "published" object, which reads as "nothing published yet" and costs one republish, while a
+        version bump would throw away the discovery and the resolved jars too - a cold bazel query
+        and a full aquery warm on the first start after every upgrade.
+     */
     private static final int FORMAT_VERSION = 7;
     private static final Map<String, ClasspathStore> STORES = new ConcurrentHashMap<>();
 
@@ -41,6 +47,19 @@ public final class ClasspathStore {
     private final Map<String, List<String>> jarsByLabel = new LinkedHashMap<>();
     private final List<BazelQuery.Target> discovery = new ArrayList<>();
     private final Map<String, List<SourceRelocation.Misplaced>> misplaced = new LinkedHashMap<>();
+
+    /*
+        ContainerStamp of the container last handed to JDT, per project, persisted across sessions.
+
+        In memory alone it was not enough. Since the generated projects survive a restart
+        (BazelBuildSupport), JDT restores their containers from its own state and never asks this
+        plugin to initialise them - so a fresh session knew nothing about what it had published, and
+        the first resolve after every start republished all of them. Republishing makes JDT drop and
+        re-index every jar behind the container: on a large repository ~1.6k jars, a gigabyte of
+        index writes, and a real chance of tripping over an index file a previous kill left
+        truncated.
+     */
+    private final Map<String, Long> publishedStamps = new LinkedHashMap<>();
 
     private String executionRoot = "";
     private String settingsFingerprint = "";
@@ -83,6 +102,7 @@ public final class ClasspathStore {
             readDiscovery(json.getAsJsonArray("discovery"));
             readMisplaced(json.getAsJsonObject("misplaced"));
             readClasspath(json.getAsJsonObject("classpath"));
+            readPublishedStamps(json.getAsJsonObject("published"));
             BazelLog.info(String.format(
                     "JBazel: loaded cached import for %s (%d targets, %d classpaths)",
                     root.getName(), discovery.size(), jarsByLabel.size()));
@@ -90,6 +110,27 @@ public final class ClasspathStore {
             BazelLog.info("JBazel: ignoring unreadable classpath cache " + file + ": " + e);
             jarsByLabel.clear();
             discovery.clear();
+        }
+    }
+
+    public synchronized Long peekPublishedStamp(String projectName) {
+        load();
+        return publishedStamps.get(projectName);
+    }
+
+    public synchronized void putPublishedStamp(String projectName, long stamp) {
+        load();
+        Long previous = publishedStamps.put(projectName, stamp);
+        dirty = dirty || previous == null || previous != stamp;
+    }
+
+    /* An explicit refresh means "hand JDT everything again", so the record of what it already has
+       goes with it. */
+    public synchronized void clearPublishedStamps() {
+        load();
+        if (!publishedStamps.isEmpty()) {
+            publishedStamps.clear();
+            dirty = true;
         }
     }
 
@@ -205,6 +246,7 @@ public final class ClasspathStore {
     public synchronized void invalidate() {
         jarsByLabel.clear();
         discovery.clear();
+        publishedStamps.clear();
         buildFilesDigest = "";
         dirty = true;
         try {
@@ -252,6 +294,10 @@ public final class ClasspathStore {
             misplacedJson.add(sourceRoot, array);
         });
         json.add("misplaced", misplacedJson);
+
+        JsonObject published = new JsonObject();
+        publishedStamps.forEach(published::addProperty);
+        json.add("published", published);
 
         JsonObject classpath = new JsonObject();
         jarsByLabel.forEach((label, jars) -> {
@@ -302,6 +348,21 @@ public final class ClasspathStore {
                         file.get("package").getAsString(), path.substring(slash + 1)));
             });
             misplaced.put(entry.getKey(), List.copyOf(files));
+        });
+    }
+
+    private void readPublishedStamps(JsonObject json) {
+        publishedStamps.clear();
+        if (json == null) {
+            return;
+        }
+        json.entrySet().forEach(entry -> {
+            try {
+                publishedStamps.put(entry.getKey(), entry.getValue().getAsLong());
+            } catch (RuntimeException e) {
+                // A stamp that cannot be read means "unknown", which republishes once. Dropping the
+                // whole cache over it would cost a full reindex instead.
+            }
         });
     }
 

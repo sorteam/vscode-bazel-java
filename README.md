@@ -141,7 +141,21 @@ size, mtime - against what was last handed to JDT (seeded by the container initi
 cache) and skips `setClasspathContainer` on a match. This is what keeps a branch switch, which
 re-resolves every project, from re-indexing the whole repository.
 [BuildClasspathJob](server/src/io/github/sorteam/bazel/jdtls/BuildClasspathJob.java) additionally
-fingerprints the jars around its build so an up-to-date build does not even trigger a refresh.
+fingerprints the jars around its build so an up-to-date build does not even trigger a refresh, and a
+build that did rewrite jars republishes those containers directly instead of forcing a discovery
+refresh - a build changes jar contents, not the project layout.
+
+**The generated projects survive a restart.** jdt.ls's
+`StandardProjectsManager.deleteInvalidProjects` keeps a project only when its location is inside a
+workspace folder, its name is the invisible-project name, or a build support claims it and answers
+`hasSpecificDeleteProjectLogic`. These projects live in the language server's metadata area, so
+without the third condition all of them were deleted and recreated on every start - and a deleted
+project takes its JDT index with it, which turned every window reload into a full re-index of the
+repository.
+[BazelBuildSupport](server/src/io/github/sorteam/bazel/jdtls/BazelBuildSupport.java) claims them
+(importer-style order 150, ahead of gradle and maven) and deletes only projects whose repository is
+no longer a workspace folder; what is otherwise stale is decided against the current target list by
+[ProjectProvisioner](server/src/io/github/sorteam/bazel/jdtls/ProjectProvisioner.java).
 
 **The bazel output tree is fenced off from the language server's scan, and the symlinks are left
 alone.** jdt.ls finds build files with `BasicFileDetector`, which walks the workspace as

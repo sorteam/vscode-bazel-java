@@ -51,6 +51,7 @@ public final class PluginTests {
         stampCoversSourceAttachmentsAndLombok();
         sourceLabelsAreFilteredOutOfTheRepositoryListing();
         doctorReadsTheBazelrcAndFindsHeavyDirectories();
+        doctorSpotsATruncatedJdtIndex();
         settingsReadBuildJobsAndMavenRepository();
 
         System.out.printf("%d checks, %d failure(s)%n", checks, FAILURES.size());
@@ -913,6 +914,47 @@ public final class PluginTests {
         check("symlinked trees are left to the symlink check",
                 Doctor.heavyDirectories(root, 5).size() == 1,
                 Doctor.heavyDirectories(root, 5).toString());
+    }
+
+    /*
+        The OOM that reads like a bug in the extension. A language server killed while saving an
+        index leaves the file half written; JDT later reads a length field out of it, gets a garbage
+        number - measured: "size 1936028278" - allocates that much and dies with OutOfMemoryError,
+        on a 16 GB heap, repeatedly. Nothing about the repository is wrong and no setting helps, so
+        the report has to name the cache and say it can be deleted.
+     */
+    private static void doctorSpotsATruncatedJdtIndex() throws Exception {
+        Path metadata = Files.createTempDirectory("jdt-metadata");
+        Path indexes = Files.createDirectories(metadata.resolve(".plugins/org.eclipse.jdt.core"));
+        Files.writeString(indexes.resolve("1865797976.index"), "x".repeat(2048));
+        Files.writeString(metadata.resolve(".log"), "!MESSAGE Workspace initialized in 182ms\n");
+
+        List<String> facts = new ArrayList<>();
+        check("a healthy index cache is a fact, not a problem",
+                Doctor.indexProblems(metadata, facts).isEmpty(), facts.toString());
+        check("and its size is reported",
+                facts.stream().anyMatch(fact -> fact.startsWith("jdt index")), facts.toString());
+
+        Files.writeString(indexes.resolve("438257673.index.tmp"), "");
+        facts.clear();
+        List<String> interrupted = Doctor.indexProblems(metadata, facts);
+        check("a half-written index file is reported", interrupted.size() == 1,
+                interrupted.toString());
+        check("and the remedy names the directory to delete",
+                interrupted.get(0).contains("org.eclipse.jdt.core"), interrupted.toString());
+
+        Files.delete(indexes.resolve("438257673.index.tmp"));
+        Files.writeString(metadata.resolve(".log"),
+                "java.io.UTFDataFormatException: Failed to read index data from file:/x.index"
+                        + " at offset 8600 and size 1936028278\n");
+        facts.clear();
+        check("so is the failure once it has already happened",
+                Doctor.indexProblems(metadata, facts).size() == 1, "");
+
+        facts.clear();
+        check("a workspace with no metadata directory says nothing",
+                Doctor.indexProblems(metadata.resolve("missing"), facts).isEmpty(), "");
+        check("nor does a null location", Doctor.indexProblems(null, facts).isEmpty(), "");
     }
 
     private static void settingsReadBuildJobsAndMavenRepository() throws Exception {

@@ -2,6 +2,7 @@ package io.github.sorteam.bazel.jdtls;
 
 import java.io.File;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -9,6 +10,8 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
+import org.eclipse.core.resources.IProject;
+import org.eclipse.core.resources.ResourcesPlugin;
 import org.eclipse.core.runtime.CoreException;
 import org.eclipse.core.runtime.IProgressMonitor;
 import org.eclipse.core.runtime.IStatus;
@@ -63,6 +66,35 @@ public final class ClasspathResolveJob extends Job {
                 enqueue(session, project, labels.mainLabels(), labels.testLabels(), false);
             }
         });
+    }
+
+    /*
+        Every project already provisioned for this session, read off the workspace instead of a
+        provisioning run. For a caller that has no project list of its own - a build that rewrote
+        jars, say - this is the difference between republishing the containers and re-importing the
+        repository to find out which projects exist.
+
+        No bazel is involved: the labels come from the projects' own properties, the batch finds them
+        all cached, and publish() then compares container stamps and hands JDT only what changed.
+     */
+    public static void enqueueAll(BazelSession session) {
+        String root = session.getWorkspace().getRoot().getAbsolutePath();
+        int queued = 0;
+        for (IProject project : ResourcesPlugin.getWorkspace().getRoot().getProjects()) {
+            if (!project.isOpen()) {
+                continue;
+            }
+            ProjectLabels labels = ProjectLabels.read(project);
+            if (labels == null || !root.equals(labels.workspaceRoot())) {
+                continue;
+            }
+            enqueue(session, JavaCore.create(project), labels.mainLabels(), labels.testLabels(),
+                    false);
+            queued++;
+        }
+        if (queued == 0) {
+            BazelLog.info("JBazel: no provisioned project to re-resolve the classpath for");
+        }
     }
 
     private synchronized void add(IJavaProject javaProject, List<String> mainLabels,
@@ -187,6 +219,28 @@ public final class ClasspathResolveJob extends Job {
     }
 
     /*
+        Whether JDT already holds exactly this container. The stamp answers a different question -
+        "have the jars changed since we last published" - and a stamp that survived the previous
+        session says nothing about whether JDT still has the container it describes: its own
+        container state lives in .metadata and can be discarded on its own. Skipping the publish
+        then would leave the project with no libraries at all, so both have to agree.
+
+        Cheap: JDT answers from memory, or initialises the container - which is this plugin's
+        initializer publishing from the same cache - and never runs bazel.
+     */
+    private static boolean holdsSameContainer(IJavaProject javaProject,
+            BazelClasspathContainer container) {
+        try {
+            IClasspathContainer current = JavaCore.getClasspathContainer(
+                    BazelClasspathContainer.CONTAINER_PATH, javaProject);
+            return current != null && Arrays.equals(current.getClasspathEntries(),
+                    container.getClasspathEntries());
+        } catch (CoreException e) {
+            return false;
+        }
+    }
+
+    /*
         Returns true when a container was actually handed to JDT. Republishing an identical one is
         not a no-op: JDT forgets what it read from every jar behind the container and re-indexes all
         of them - on a large repository ~1.6k jars and over a gigabyte of index writes, which is
@@ -202,14 +256,15 @@ public final class ClasspathResolveJob extends Job {
 
         String projectName = request.javaProject().getProject().getName();
         long stamp = ContainerStamp.of(executionRoot, mainJars, testJars);
+        BazelClasspathContainer container =
+                BazelClasspathContainer.fromJars(executionRoot, mainJars, testJars);
         Long lastPublished = session.getPublishedContainerStamp(projectName);
-        if (lastPublished != null && lastPublished == stamp) {
+        if (lastPublished != null && lastPublished == stamp
+                && holdsSameContainer(request.javaProject(), container)) {
             session.getReport().countContainerUnchanged();
             return false;
         }
 
-        BazelClasspathContainer container =
-                BazelClasspathContainer.fromJars(executionRoot, mainJars, testJars);
         try {
             JavaCore.setClasspathContainer(BazelClasspathContainer.CONTAINER_PATH,
                     new IJavaProject[] { request.javaProject() },

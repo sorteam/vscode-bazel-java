@@ -98,12 +98,26 @@ public final class BazelSession {
         return classpathGate;
     }
 
+    /*
+        Falls back to the previous session's record. The projects outlive a restart, so JDT restores
+        their containers without asking this plugin to initialise them, and an empty in-memory map
+        would make the first resolve of every session republish - and reindex - the whole classpath.
+     */
     public Long getPublishedContainerStamp(String projectName) {
-        return publishedContainerStamps.get(projectName);
+        Long known = publishedContainerStamps.get(projectName);
+        if (known != null) {
+            return known;
+        }
+        Long stored = store.peekPublishedStamp(projectName);
+        if (stored != null) {
+            publishedContainerStamps.putIfAbsent(projectName, stored);
+        }
+        return stored;
     }
 
     public void setPublishedContainerStamp(String projectName, long stamp) {
         publishedContainerStamps.put(projectName, stamp);
+        store.putPublishedStamp(projectName, stamp);
     }
 
     /*
@@ -115,6 +129,7 @@ public final class BazelSession {
         BazelBinary.invalidate();
         cache.clear();
         publishedContainerStamps.clear();
+        store.clearPublishedStamps();
         if (dropDiskCache) {
             store.invalidate();
         }

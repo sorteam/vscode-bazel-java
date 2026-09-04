@@ -10,6 +10,14 @@
             class="io.github.sorteam.bazel.jdtls.BazelProjectImporter"/>
    </extension>
    <extension
+         id="buildSupport"
+         point="org.eclipse.jdt.ls.core.buildSupport">
+      <buildSupport
+            id="bazelBuildSupport"
+            order="150"
+            class="io.github.sorteam.bazel.jdtls.BazelBuildSupport"/>
+   </extension>
+   <extension
          point="org.eclipse.jdt.core.classpathContainerInitializer">
       <classpathContainerInitializer
             id="io.github.sorteam.bazel.jdtls.BAZEL_CONTAINER"

@@ -129,9 +129,19 @@ public final class BuildClasspathJob extends Job {
                 DiscoveryRefreshJob.scheduleFor(session);
                 return Status.OK_STATUS;
             }
-            BazelLog.info(String.format("JBazel: built %d target(s) in %d ms; refreshing classpath",
-                    labels.size(), elapsed));
-            DiscoveryRefreshJob.scheduleFor(session, true);
+            /*
+                The jars changed, so the containers behind them have to be handed to JDT again - but
+                only that. This used to force a discovery refresh, which re-ran bazel query,
+                re-provisioned all projects and re-resolved every label through aquery: measured at
+                ~30 s of work after every start, for a build that cannot change the project layout.
+                A build rewrites jar contents; the set of jars behind a label only moves when a
+                BUILD or lock file does, and the non-forced refresh scheduled below is what notices
+                that - by digest, without bazel.
+             */
+            BazelLog.info(String.format("JBazel: built %d target(s) in %d ms; jars changed,"
+                    + " republishing the affected classpaths", labels.size(), elapsed));
+            ClasspathResolveJob.enqueueAll(session);
+            DiscoveryRefreshJob.scheduleFor(session);
         } catch (CoreException e) {
             if (BazelWorkspace.isServerBusy(e) && ++busyDeferrals <= MAX_BUSY_DEFERRALS) {
                 schedule(BUSY_DEFER_MILLIS);
