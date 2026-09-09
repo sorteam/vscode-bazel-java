@@ -43,6 +43,9 @@ public final class ClasspathResolveJob extends Job {
     private final Map<String, Request> pending = new LinkedHashMap<>();
     private final Set<String> priority = new LinkedHashSet<>();
 
+    /* Projects taken out of `pending` and being worked on, so the status can count them too. */
+    private volatile int inFlight;
+
     private ClasspathResolveJob(BazelSession session) {
         super("Resolving bazel classpath for " + session.getWorkspace().getRoot().getName());
         this.session = session;
@@ -132,6 +135,7 @@ public final class ClasspathResolveJob extends Job {
         if (batch.isEmpty()) {
             return Status.OK_STATUS;
         }
+        inFlight = batch.size();
 
         try {
             /*
@@ -178,6 +182,14 @@ public final class ClasspathResolveJob extends Job {
             }
             session.getStore().save();
             session.getClasspathGate().recordSuccess();
+            /*
+                The other half of publishing, and the one a container cannot carry: a jar bazel
+                rewrote keeps its path, so an unchanged container can still be pointing at a jar
+                whose content JDT read before the build. See ExternalArchives.
+             */
+            List<IJavaProject> resolved = new ArrayList<>();
+            batch.forEach(request -> resolved.add(request.javaProject()));
+            ExternalArchives.refresh(resolved);
             BuildClasspathJob.startIfConfigured(session);
         } catch (CoreException e) {
             if (BazelWorkspace.isServerBusy(e)) {
@@ -192,8 +204,29 @@ public final class ClasspathResolveJob extends Job {
                         pending.putIfAbsent(request.javaProject().getProject().getName(), request));
             }
             schedule(session.getClasspathGate().remainingSeconds() * 1000 + 500);
+        } finally {
+            inFlight = 0;
         }
         return Status.OK_STATUS;
+    }
+
+    /*
+        How many projects are queued or being resolved, for the status the client polls.
+
+        It exists because the alternative is silence: resolving a package pulled in on demand takes
+        seconds of bazel, and a developer who opens a file and sees nothing at all cannot tell that
+        from a hang. Counting the batch in flight as well as the queue matters for the same reason -
+        the queue is empty for exactly the stretch where the work is actually happening.
+     */
+    public static int resolving(BazelSession session) {
+        ClasspathResolveJob job =
+                JOBS.get(session.getWorkspace().getRoot().getAbsolutePath());
+        if (job == null) {
+            return 0;
+        }
+        synchronized (job) {
+            return job.pending.size() + job.inFlight;
+        }
     }
 
     private File executionRoot(IProgressMonitor monitor) throws CoreException {
@@ -245,7 +278,13 @@ public final class ClasspathResolveJob extends Job {
         not a no-op: JDT forgets what it read from every jar behind the container and re-indexes all
         of them - on a large repository ~1.6k jars and over a gigabyte of index writes, which is
         most of what "the java process hangs after a branch switch" was. The stamp covers the jar
-        list, its order, and each jar's size and mtime, so a jar rebuilt in place still republishes.
+        list, its order and the source jar attached to each entry: everything the container says.
+
+        What it deliberately does not cover is the content of those jars. Making a rebuilt jar
+        republish its container looked like the way to get the new classes into the editor and is
+        not: JDT compares entries, sees the same paths, and neither fires a delta nor re-reads the
+        jar - so the republish cost a repository-wide reindex and changed nothing. That is
+        ExternalArchives' job, and it is called for the whole batch once the publishing is done.
      */
     private boolean publish(Request request, File executionRoot) {
         Set<String> mainJars = new LinkedHashSet<>();
@@ -259,8 +298,22 @@ public final class ClasspathResolveJob extends Job {
         BazelClasspathContainer container =
                 BazelClasspathContainer.fromJars(executionRoot, mainJars, testJars);
         Long lastPublished = session.getPublishedContainerStamp(projectName);
-        if (lastPublished != null && lastPublished == stamp
-                && holdsSameContainer(request.javaProject(), container)) {
+        if (holdsSameContainer(request.javaProject(), container)) {
+            /*
+                What JDT is holding decides this, not the stamp. The stamp is a record of what this
+                plugin handed over and it can be stale for reasons that have nothing to do with the
+                classpath - its own format changed in an upgrade, the metadata was cleaned, the
+                cache came from a session that ended badly - and every one of those used to mean
+                republishing all of it. That is not a cheap mistake: it re-indexes every jar behind
+                every container, minutes of work on a large repository, and a start that runs long
+                is a start redhat.java abandons - it races the handshake against a 30 s timeout and
+                then launches a second language server on the same -data directory without stopping
+                the first, which corrupts the shared JDT index. So a stale stamp is corrected
+                against reality and nothing is published.
+             */
+            if (lastPublished == null || lastPublished != stamp) {
+                session.setPublishedContainerStamp(projectName, stamp);
+            }
             session.getReport().countContainerUnchanged();
             return false;
         }

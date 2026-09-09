@@ -32,6 +32,7 @@ public class BazelCommandHandler implements IDelegateCommandHandler {
     public static final String IMPORT_FILE = "jbazel.importFile";
     public static final String STATUS = "jbazel.status";
     public static final String BUILD_FILES_CHANGED = "jbazel.buildFilesChanged";
+    public static final String SYNC_JARS = "jbazel.syncClasspathJars";
 
     @Override
     public Object executeCommand(String commandId, List<Object> arguments,
@@ -53,6 +54,8 @@ public class BazelCommandHandler implements IDelegateCommandHandler {
                 return status();
             case BUILD_FILES_CHANGED:
                 return buildFilesChanged();
+            case SYNC_JARS:
+                return ExternalArchives.sync();
             default:
                 throw new UnsupportedOperationException("Unknown command " + commandId);
         }
@@ -137,6 +140,7 @@ public class BazelCommandHandler implements IDelegateCommandHandler {
             entry.put("serverBusy", session.getWorkspace().wasBusyRecently()
                     || session.getDiscoveryGate().isBusyWaiting()
                     || session.getClasspathGate().isBusyWaiting());
+            entry.put("resolving", ClasspathResolveJob.resolving(session));
             entry.put("missingJars", session.getReport().getMissingJars());
             entry.put("classpathJars", session.getReport().getResolvedJars());
             entry.put("jarsWithSources", session.getReport().getJarsWithSources());

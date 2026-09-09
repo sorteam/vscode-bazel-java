@@ -81,7 +81,40 @@ function syncSettings() {
   return written;
 }
 
+/*
+  redhat.java's own API is the only honest "the server can take requests now" signal, and everything
+  here needs it. Workspace commands used to be sent the moment there was a reason to send one - the
+  extension activating, a document opening, the window regaining focus - and those reasons arrive
+  while the language client is still starting. A request sent then is not merely dropped: it lands in
+  the middle of the client's own start sequence, and a start that does not finish within 30 s is a
+  start redhat.java abandons, silently, for a second language server on the same -data directory
+  (`pipeStartTimeout`). Two servers there corrupt the shared JDT index. So the ordering is a
+  correctness requirement and not politeness.
+
+  The wait is bounded because serverReady() never resolves if the server fails outright, and a
+  developer invoking "JBazel: Doctor" on a broken server deserves the error rather than silence.
+*/
+const SERVER_READY_TIMEOUT_MS = 120000;
+let serverReadyPromise = null;
+
+function whenServerReady() {
+  if (!serverReadyPromise) {
+    const java = vscode.extensions.getExtension("redhat.java");
+    const ready = java
+      ? Promise.resolve(java.activate()).then((api) =>
+          api && typeof api.serverReady === "function" ? api.serverReady() : undefined
+        )
+      : Promise.resolve();
+    serverReadyPromise = Promise.race([
+      ready.catch(() => undefined),
+      new Promise((resolve) => setTimeout(resolve, SERVER_READY_TIMEOUT_MS)),
+    ]);
+  }
+  return serverReadyPromise;
+}
+
 async function serverCommand(command, ...args) {
+  await whenServerReady();
   return vscode.commands.executeCommand("java.execute.workspaceCommand", command, ...args);
 }
 
@@ -184,12 +217,26 @@ function activate(context) {
     identical to one that simply has no dependencies - which is how a broken import went unnoticed
     for a whole night.
   */
+  /*
+    While the classpath is being resolved the status is polled on its own short interval rather than
+    the 30 s one, because that stretch is the whole point of showing it: resolving a package pulled
+    in on demand is seconds of bazel, and at 30 s granularity the indicator would appear after the
+    work it was meant to describe had finished.
+  */
+  let soon = null;
+  context.subscriptions.push({ dispose: () => soon && clearTimeout(soon) });
+
   async function refreshStatus() {
+    if (soon) {
+      clearTimeout(soon);
+      soon = null;
+    }
     try {
       const state = await serverCommand("jbazel.status");
       const entries = Object.values(state || {});
       const backoff = entries.reduce((max, entry) => Math.max(max, entry.backoffSeconds || 0), 0);
       const missing = entries.reduce((sum, entry) => sum + (entry.missingJars || 0), 0);
+      const resolving = entries.reduce((sum, entry) => sum + (entry.resolving || 0), 0);
       const busy = entries.some((entry) => entry.serverBusy);
       const blocked = entries.find((entry) => entry.needsFix);
       if (blocked) {
@@ -219,6 +266,15 @@ function activate(context) {
         status.text = `$(warning) JBazel: retry in ${backoff}s`;
         status.tooltip = entries.map((entry) => entry.discovery).join("\n");
         status.show();
+      } else if (resolving > 0) {
+        status.text = `$(sync~spin) JBazel: resolving ${resolving} classpath${
+          resolving === 1 ? "" : "s"
+        }`;
+        status.tooltip =
+          "Asking bazel which jars these projects compile against. Types from a package that was " +
+          "just pulled in resolve when this finishes.";
+        status.show();
+        soon = setTimeout(refreshStatus, 1500);
       } else if (missing > 0) {
         status.text = `$(warning) JBazel: ${missing} jars not built`;
         status.tooltip = "Run 'JBazel: Build Classpath' to produce them.";
@@ -325,6 +381,31 @@ function activate(context) {
     Asking the server to provision just that package costs one scoped query; the server answers
     "already imported" cheaply when the file is covered, so this is safe to send on every open.
   */
+  /*
+    Progress only when there is something to wait for. A file inside the imported scope is answered
+    "Already imported." in milliseconds, and a spinner that flashes on every tab is worse than none;
+    a package that has to be queried and provisioned takes seconds of bazel, and for those seconds
+    silence is indistinguishable from a hang - which is what gets reported as "I open a file and it
+    just does not load". The status bar then carries the classpath resolution that follows, so the
+    two together cover the whole wait rather than its first half.
+  */
+  async function withProgressIfSlow(title, work) {
+    const promise = work();
+    let settled = false;
+    const mark = () => {
+      settled = true;
+    };
+    promise.then(mark, mark);
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    if (settled) {
+      return promise;
+    }
+    return vscode.window.withProgress(
+      { location: vscode.ProgressLocation.Window, title },
+      () => promise
+    );
+  }
+
   const requested = new Set();
   context.subscriptions.push(
     vscode.workspace.onDidOpenTextDocument(async (document) => {
@@ -335,8 +416,25 @@ function activate(context) {
         return;
       }
       requested.add(document.uri.fsPath);
+      const name = path.basename(document.uri.fsPath);
       try {
-        await serverCommand("jbazel.importFile", document.uri.fsPath);
+        /*
+          Awaited before the progress starts, not inside it. Editors restored with the window open
+          their documents before the server is ready, so counting that wait as work put a spinner
+          saying "importing the package that owns X" on the screen while nothing was being imported -
+          and, on a file already inside the imported scope, nothing ever would be.
+        */
+        await whenServerReady();
+        const answer = String(
+          (await withProgressIfSlow(`JBazel: importing the package that owns ${name}`, () =>
+            serverCommand("jbazel.importFile", document.uri.fsPath)
+          )) || ""
+        );
+        // "Already imported." is the answer for most files and says nothing worth a line.
+        if (answer && !answer.startsWith("Already imported")) {
+          channel.appendLine(`${name}: ${answer}`);
+          refreshStatus();
+        }
       } catch (error) {
         // The server may not be up yet; the next file opened will try again.
         requested.delete(document.uri.fsPath);
@@ -375,6 +473,46 @@ function activate(context) {
   context.subscriptions.push(watcher, {
     dispose: () => pending && clearTimeout(pending),
   });
+
+  /*
+    A jar the developer's own bazel rewrote keeps its path, and the language server caches what it
+    read from every jar outside the workspace, so a class compiled minutes ago can stay unresolved in
+    the editor until the window is reloaded. Nothing in the repository changed that anyone watches -
+    the BUILD files are untouched by a plain rebuild - so the server has to be told to look, and the
+    look is one stat per classpath jar.
+
+    Hence the cues rather than a signal: the window regaining focus, a terminal command finishing
+    (only where the shell integration reports it), the editor coming back to the front after the
+    terminal panel. They fire together and they fire often, so both sides throttle - here to keep
+    the round trips down, in the server to keep the java model out of it.
+  */
+  let lastSync = 0;
+  const syncClasspathJars = async () => {
+    const now = Date.now();
+    if (now - lastSync < 2000) {
+      return;
+    }
+    lastSync = now;
+    try {
+      await serverCommand("jbazel.syncClasspathJars");
+    } catch (error) {
+      // Nothing imported yet, or the server is still starting; the next cue tries again.
+      lastSync = 0;
+    }
+  };
+  context.subscriptions.push(
+    vscode.window.onDidChangeWindowState((state) => {
+      if (state.focused) {
+        syncClasspathJars();
+      }
+    }),
+    vscode.window.onDidChangeActiveTextEditor(() => syncClasspathJars())
+  );
+  if (typeof vscode.window.onDidEndTerminalShellExecution === "function") {
+    context.subscriptions.push(
+      vscode.window.onDidEndTerminalShellExecution(() => syncClasspathJars())
+    );
+  }
 
   const timer = setInterval(refreshStatus, 30000);
   context.subscriptions.push({ dispose: () => clearInterval(timer) });

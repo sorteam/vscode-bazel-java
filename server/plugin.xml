@@ -41,6 +41,7 @@
          <command id="jbazel.importFile"/>
          <command id="jbazel.status"/>
          <command id="jbazel.buildFilesChanged"/>
+         <command id="jbazel.syncClasspathJars"/>
       </delegateCommandHandler>
    </extension>
 </plugin>

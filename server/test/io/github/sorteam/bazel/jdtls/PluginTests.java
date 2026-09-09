@@ -476,11 +476,28 @@ public final class PluginTests {
         check("the main/test split is part of the identity",
                 stamp != ContainerStamp.of(root.toFile(), List.of("a.jar"), List.of("b.jar")), "");
 
+        /*
+            A jar rebuilt in place is the same container, and saying otherwise is what used to cost a
+            repository-wide reindex for nothing: JDT compares entries, and the entry is identical.
+            The new classes in it get to the editor through ExternalArchives instead.
+         */
         long before = ContainerStamp.of(root.toFile(), List.of("a.jar"), List.of());
+        Files.writeString(root.resolve("a.jar"), "aa but rebuilt");
         root.resolve("a.jar").toFile().setLastModified(
                 root.resolve("a.jar").toFile().lastModified() + 5000);
-        check("a jar rebuilt in place changes the stamp",
-                before != ContainerStamp.of(root.toFile(), List.of("a.jar"), List.of()), "");
+        check("a jar rebuilt in place is still the same container",
+                before == ContainerStamp.of(root.toFile(), List.of("a.jar"), List.of()), "");
+
+        /*
+            Existing or not is a different matter: aquery reports the jars a Javac action would
+            consume, the container drops the ones that are not on disk yet, so a jar the first build
+            produces has to republish or it never enters the classpath at all.
+         */
+        long missing = ContainerStamp.of(root.toFile(), List.of("built-later.jar"), List.of());
+        Files.writeString(root.resolve("built-later.jar"), "classes");
+        check("a jar that has just been built changes the stamp",
+                missing != ContainerStamp.of(root.toFile(), List.of("built-later.jar"), List.of()),
+                "");
     }
 
     private static void partialAqueryKeepsPopulatedClasspaths() {
@@ -922,8 +939,8 @@ public final class PluginTests {
     }
 
     /*
-        The regression this prevents: fetching source jars changes nothing about the classpath - same
-        jars, same order, same mtimes - so a stamp that ignored source attachments reported "nothing
+        The regression this prevents: fetching source jars changes nothing else about the classpath -
+        same jars, same order - so a stamp that ignored source attachments reported "nothing
         changed", the containers were not republished, and the freshly downloaded sources stayed
         invisible until the window was reloaded.
      */
@@ -936,9 +953,10 @@ public final class PluginTests {
         long after = ContainerStamp.of(root.toFile(), List.of("guava.jar"), List.of());
         check("a source jar appearing next to a jar changes the stamp", before != after, "");
 
+        /* Its content, on the other hand, is not the container's business - see ExternalArchives. */
         Files.writeString(root.resolve("guava-sources.jar"), "more source");
-        check("and so does the source jar changing",
-                after != ContainerStamp.of(root.toFile(), List.of("guava.jar"), List.of()), "");
+        check("and the source jar's own content does not",
+                after == ContainerStamp.of(root.toFile(), List.of("guava.jar"), List.of()), "");
 
         /* The stamp has to describe the file that goes on the classpath, lombok substitution and all. */
         Files.writeString(root.resolve("header_lombok-1.18.30.jar"), "stub");

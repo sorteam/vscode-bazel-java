@@ -338,6 +338,21 @@ public final class ClasspathStore {
         json.add("classpath", classpath);
 
         try {
+            /*
+                This store lives in the language server's own instance area, and "Clean Java
+                Language Server Workspace" has the client delete that area recursively while this
+                process is on its way out - which is exactly when the shutdown hook calls save().
+                Creating our directory back into the middle of that delete is what leaves the clean
+                failing with "ENOTEMPTY: directory not empty, rmdir .../.metadata/.plugins", every
+                time, and the clean the developer asked for does not happen.
+
+                So the surrounding area decides. If .plugins is gone the metadata is being thrown
+                away, this cache is part of what is being thrown away, and writing 17 MB of it back
+                helps nobody. Only our own subdirectory is ever created, never the area above it.
+             */
+            if (!Files.isDirectory(file.getParent().getParent())) {
+                return;
+            }
             Files.createDirectories(file.getParent());
             Path temporary = file.resolveSibling(file.getFileName() + ".tmp");
             Files.writeString(temporary, json.toString(), StandardCharsets.UTF_8);

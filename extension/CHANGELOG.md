@@ -1,5 +1,83 @@
 # Changelog
 
+## 0.8.2
+
+- **A jar that bazel rebuilt is re-read, so a class built a minute ago is a class the editor knows
+  about.** Every entry on these classpaths is an absolute path outside the workspace, which JDT
+  calls an external archive and treats as immutable: it remembers each one's modification time in
+  the java model and compares that memory against the disk at exactly two moments - when the
+  language server starts, and when `refreshExternalArchives` is called. Nothing called it.
+
+  So a rebuild that changes a jar without changing its path - a generated API library after its
+  spec was edited, any library after an ordinary `bazel build` - left the editor resolving imports
+  against the jar as it had been read hours earlier. Measured: a jar holding the new type since
+  12:28, a full classpath refresh at 12:51 that republished 42 containers, and the model's record of
+  that jar still reading 12:21 the day before. `The import ... cannot be resolved`, on a class that
+  had been on disk for twenty minutes, until the window was reloaded - a full reindex of the
+  repository to pick up one jar.
+
+  [ExternalArchives](../server/src/io/github/sorteam/bazel/jdtls/ExternalArchives.java) closes it.
+  Every classpath resolve ends by checking the jars behind the projects it just resolved, and the
+  extension asks for the same check when the window regains focus, when a terminal command finishes
+  and when an editor comes back to the front - because a build run in a terminal rewrites jars and
+  tells the IDE nothing at all.
+
+  The check is deliberately not `refreshExternalArchives` itself. That call is not a check: it takes
+  the java model lock, walks every archive of every project in scope and queues each moved one for
+  indexing, so a pass over a whole workspace with stale recorded timestamps is minutes of indexing
+  under a lock. Minutes matter here beyond being slow - redhat.java races the LSP handshake against
+  30 s and then starts a *second* language server on the same `-data` directory without stopping the
+  first, and two servers there write one JDT index until it comes back with garbage length fields
+  that JDT allocates. So this plugin does the cheap half where no lock is held: it stats the jars
+  behind the published containers, once per distinct path (a large workspace shares ~1.6k jars across
+  ~50k container entries), and hands JDT only the projects whose jars actually moved. The first pass
+  seeds and reports nothing, since the language server refreshed those archives itself during
+  startup. A pass that finds nothing costs stats and touches neither the model lock nor the index.
+- **Containers are no longer republished for a jar whose content changed** - the republish that was
+  supposed to be how those changes reached JDT, and demonstrably was not. It compares classpath
+  entries, the entry is identical, no delta fires; what it did cost was JDT dropping and re-indexing
+  every jar behind the container, ~1.6k of them on a large repository, which is most of what "the
+  java process is busy for minutes after a build" was. The
+  [ContainerStamp](../server/src/io/github/sorteam/bazel/jdtls/ContainerStamp.java) now covers what
+  the container actually says - which jars, in which order, which of them exist, and the source jar
+  attached to each - and content is left to the archive refresh above.
+
+- **Nothing is sent to the language server before it says it is ready.** The extension used to fire
+  workspace commands on the first reason it had - activating, a document opening, a 30 s status poll
+  - and those reasons arrive while redhat.java's language client is still starting. That window is
+  not a safe place to be: a client start that does not finish within 30 s is one redhat.java
+  abandons, silently, for a *second* language server on the same `-data` directory
+  (`pipeStartTimeout: 3e4`, and the catch clause stops neither the first client nor its process).
+  Two servers there write one JDT index and it comes back with garbage length fields.
+
+  Measured while looking for the cost: with a real 116-project `-data` directory and all 41 jdt.ls
+  extension bundles, the server answers `initialize` in 3.4 s, and this plugin's bundle accounts for
+  70 ms of that - so the budget is spent on the client side, which is exactly where an ill-timed
+  request lands. Every command now waits on redhat.java's own `serverReady()` first, with a bounded
+  wait so a server that fails to start still reports an error instead of hanging.
+- **"Clean Java Language Server Workspace" works again.** It failed with `ENOTEMPTY: directory not
+  empty, rmdir .../.metadata/.plugins` every time, and the clean the developer asked for simply did
+  not happen. The import cache is written into the language server's instance area, the clean has
+  the client delete that area recursively while the server process is exiting, and the shutdown hook
+  that persists the cache created its directory straight back into the middle of that delete - along
+  with a temp file and 17 MB of JSON. The save now treats the surrounding `.plugins` area as the
+  authority: if it is gone the metadata is being thrown away, this cache with it, and nothing is
+  written. Only the store's own subdirectory is ever created.
+- **A stale container stamp no longer costs a reindex.** The stamp records what this plugin handed
+  JDT, and it can be stale for reasons that say nothing about the classpath: its own format changed
+  in an upgrade, the metadata was cleaned, a session ended badly. Publishing on that basis re-reads
+  and re-indexes every jar behind every container, and on a large repository that is minutes -
+  minutes that redhat.java does not grant. It races the handshake against a 30 s timeout
+  (`pipeStartTimeout`) and then starts a *second* language server on the same `-data` directory
+  without stopping the first; the two corrupt the shared JDT index, which comes back with garbage
+  length fields that JDT dutifully allocates. Observed: two servers at 8.4 GB and 2.7 GB, and an
+  editor resolving nothing. The publish site now asks JDT what container it is holding before it
+  acts on a stamp mismatch, and corrects the stamp instead of republishing - so upgrading to this
+  version costs no reindex at all.
+
+  On a workspace this size, `"java.transport": "stdio"` is worth setting regardless: it makes
+  redhat.java skip that race entirely.
+
 ## 0.8.1
 
 - **The runtime jars are handed to launches instead of being put on the project's classpath.** 0.8.0

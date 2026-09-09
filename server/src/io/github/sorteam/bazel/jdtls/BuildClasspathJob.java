@@ -130,16 +130,22 @@ public final class BuildClasspathJob extends Job {
                 return Status.OK_STATUS;
             }
             /*
-                The jars changed, so the containers behind them have to be handed to JDT again - but
-                only that. This used to force a discovery refresh, which re-ran bazel query,
-                re-provisioned all projects and re-resolved every label through aquery: measured at
-                ~30 s of work after every start, for a build that cannot change the project layout.
-                A build rewrites jar contents; the set of jars behind a label only moves when a
-                BUILD or lock file does, and the non-forced refresh scheduled below is what notices
-                that - by digest, without bazel.
+                The jars changed, so the classpath has to be resolved again - but only that. This
+                used to force a discovery refresh, which re-ran bazel query, re-provisioned all
+                projects and re-resolved every label through aquery: measured at ~30 s of work after
+                every start, for a build that cannot change the project layout. A build rewrites jar
+                contents; the set of jars behind a label only moves when a BUILD or lock file does,
+                and the non-forced refresh scheduled below is what notices that - by digest, without
+                bazel.
+
+                Most of what the resolve then does is not republishing. A jar the build rewrote in
+                place is the same classpath entry, so its container is unchanged and stays where it
+                is; what makes its new classes visible is the external-archive refresh the resolve
+                ends with. Containers move only for jars that appeared, vanished or resolved
+                elsewhere.
              */
             BazelLog.info(String.format("JBazel: built %d target(s) in %d ms; jars changed,"
-                    + " republishing the affected classpaths", labels.size(), elapsed));
+                    + " re-reading the affected classpaths", labels.size(), elapsed));
             ClasspathResolveJob.enqueueAll(session);
             DiscoveryRefreshJob.scheduleFor(session);
         } catch (CoreException e) {

@@ -14,7 +14,7 @@ Published as `belfegor.vscode-bazel-java`.
 | Path | What it is |
 |---|---|
 | [extension/](extension/) | Everything that goes into the vsix: the JS half, the manifest, the marketplace page |
-| [extension/extension.js](extension/extension.js) | Settings mirror, commands, status bar, BUILD file watcher |
+| [extension/extension.js](extension/extension.js) | Settings mirror, commands, status bar, BUILD file watcher, rebuilt-jar cues |
 | [server/src/](server/src/io/github/sorteam/bazel/jdtls/) | The OSGi bundle that runs inside jdt.ls |
 | [server/plugin.xml](server/plugin.xml) | Extension points: project importer, classpath container, command handler |
 | [server/test/](server/test/io/github/sorteam/bazel/jdtls/PluginTests.java) | Plain-main tests for the classes that avoid the Eclipse runtime |
@@ -30,7 +30,19 @@ Published as `belfegor.vscode-bazel-java`.
 ./install.sh   # package, then install the vsix through the code CLI
 ```
 
-Then reload the VS Code window.
+`install.sh` refuses to run while VS Code is open, and the check is not pedantry. Replacing a bundle
+listed in `contributes.javaExtensions` makes redhat.java restart the language server to synchronise
+bundles; the restarted client re-registers every command the server advertises, and another jdt.ls
+extension already holding one of those names - vscode-spring-boot registers
+`sts.java.addClasspathListener` - fails that initialisation with "command already exists". The client
+then starts a second server without stopping the first, so two language servers end up on one `-data`
+directory writing one JDT index, which comes back with garbage length fields (`Failed to read index
+data ... size 1349676899`) that JDT then allocates. Observed: two orphaned servers at 8.4 GB and
+2.7 GB, a corrupt index, and a full reindex to recover. `FORCE=1` overrides the check - and after
+that, quit and reopen VS Code rather than reloading the window, since a reload keeps the extension
+host and its stale command registrations.
+
+After a normal install, reload the VS Code window.
 
 The build is javac and jar - no Maven, no Tycho, no target platform. The classpath comes from the
 jars inside an installed redhat.java, so there is a real dependency on which version that is:
@@ -129,21 +141,61 @@ directory left behind by a previous session comes back with an empty `<natures>`
 java model until that batch ends and the delta has been broadcast, so configuring it in the same
 transaction fails. Creation is its own transaction; configuration runs in a second one.
 
-**Containers are republished only when their content actually changed.** Republishing makes JDT
-forget what it read from every jar behind the container and index them again - on a large repository
-~1.6k jars and over a gigabyte under `.metadata/.plugins/org.eclipse.jdt.core`. That is not merely
-slow: an editor closed mid-write leaves truncated index files behind, and JDT later reads a length
-field out of one of them as garbage (`Failed to read index data ... size 1885434739`) and dies with
+**Containers are republished only when the container changed.** Republishing makes JDT forget what
+it read from every jar behind the container and index them again - on a large repository ~1.6k jars
+and over a gigabyte under `.metadata/.plugins/org.eclipse.jdt.core`. That is not merely slow: an
+editor closed mid-write leaves truncated index files behind, and JDT later reads a length field out
+of one of them as garbage (`Failed to read index data ... size 1885434739`) and dies with
 `OutOfMemoryError` regardless of `-Xmx`. The guard sits at the publish site:
 [ClasspathResolveJob](server/src/io/github/sorteam/bazel/jdtls/ClasspathResolveJob.java) compares a
-[ContainerStamp](server/src/io/github/sorteam/bazel/jdtls/ContainerStamp.java) - jar list, order,
-size, mtime - against what was last handed to JDT (seeded by the container initializer from the disk
-cache) and skips `setClasspathContainer` on a match. This is what keeps a branch switch, which
-re-resolves every project, from re-indexing the whole repository.
+[ContainerStamp](server/src/io/github/sorteam/bazel/jdtls/ContainerStamp.java) - which jars, in
+which order, which of them exist, and the source jar attached to each - against what was last handed
+to JDT (seeded by the container initializer from the disk cache) and skips `setClasspathContainer` on
+a match. This is what keeps a branch switch, which re-resolves every project, from re-indexing the
+whole repository. On a *mismatch* the stamp does not get the last word: the container JDT is actually
+holding is compared entry by entry first, because a stamp can be stale for reasons that say nothing
+about the classpath - its own format changed in an upgrade, the metadata was cleaned - and acting on
+that would reindex everything to publish what JDT already has.
+
+**A start that runs long is a start the client abandons - with a second server.** redhat.java races
+the LSP handshake against a 30 s timeout (`pipeStartTimeout: 3e4`) and, on timeout, builds a new
+language client over stdio and starts it **without stopping the first**: two language servers then
+run on one `-data` directory. They write one JDT index, and it does not survive that - it comes back
+with garbage length fields (`Failed to read index data ... size 1349676899`) which JDT allocates,
+so the symptom is a language server at 8 GB and an editor that resolves nothing. The client also
+reports it as `command 'sts.java.addClasspathListener' already exists`, because the second client
+re-registers commands the first one already registered. Nothing in this plugin can undo that, which
+is why keeping the start short is a correctness requirement here and not a nicety, and why
+`java.transport: "stdio"` is worth setting on a large workspace: with the transport already stdio,
+redhat.java skips the race entirely.
 [BuildClasspathJob](server/src/io/github/sorteam/bazel/jdtls/BuildClasspathJob.java) additionally
 fingerprints the jars around its build so an up-to-date build does not even trigger a refresh, and a
-build that did rewrite jars republishes those containers directly instead of forcing a discovery
+build that did rewrite jars re-resolves those classpaths directly instead of forcing a discovery
 refresh - a build changes jar contents, not the project layout.
+
+**A rebuilt jar has to be handed to JDT separately from the container.** Every entry here is an
+absolute path outside the workspace - an *external archive*, which JDT treats as immutable: the
+modification time of each one lives in the java model's own state and is compared against the disk
+when the language server starts and when `IJavaModel.refreshExternalArchives` is called, and at no
+other time. Republishing the container is not a substitute and looks like one: `setClasspathContainer`
+compares entries, a rebuilt jar keeps its path, so no delta fires and JDT keeps answering from the
+package list and index it built before the build. Measured: a jar holding a new type since 12:28, 42
+containers republished at 12:51, and the model's record of that jar still reading 12:21 the day
+before - `The import ... cannot be resolved` on a class that was on disk, until the window was
+reloaded.
+[ExternalArchives](server/src/io/github/sorteam/bazel/jdtls/ExternalArchives.java) makes the call:
+after every resolve for the projects it resolved, and on the client's cue (window focus, a terminal
+command ending, an editor coming back to the front) for all of them, since a build run in a terminal
+rewrites jars and notifies nothing.
+
+It does not make that call unconditionally, and that is the load-bearing half.
+`refreshExternalArchives` takes the java model lock, walks every archive of every project in scope
+and queues each moved one for indexing, so a pass over a whole workspace with stale recorded
+timestamps is minutes of indexing under a lock rather than a check - and by the invariant above, a
+start that runs long is a start the client abandons for a second server. The cheap half therefore
+happens here, where no lock is held: the jars behind the published containers are stat'ed, once per
+distinct path (~1.6k jars across ~50k container entries on a large workspace), and JDT is handed
+only the projects whose jars moved. A pass that finds nothing costs stats and nothing else.
 
 **The generated projects survive a restart.** jdt.ls's
 `StandardProjectsManager.deleteInvalidProjects` keeps a project only when its location is inside a
