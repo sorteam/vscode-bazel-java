@@ -197,6 +197,39 @@ happens here, where no lock is held: the jars behind the published containers ar
 distinct path (~1.6k jars across ~50k container entries on a large workspace), and JDT is handed
 only the projects whose jars moved. A pass that finds nothing costs stats and nothing else.
 
+**A shutdown hook that waits is a language server that does not exit.** The JVM runs every
+registered hook to completion before it goes, so anything slow in one turns an exit into an orphan -
+and the orphan still holds the lock on its `-data` directory, which is exactly what makes the next
+server's start run long, with the consequence in the invariant above. What used to be in the hook was
+a `bazel shutdown` whose output was read to EOF with no timeout at all, on a client that blocks for as
+long as whoever holds the output base keeps it. It is now started and abandoned, with
+`--noblock_for_lock`, and `--max_idle_secs` is what actually guarantees the server goes away. The
+cache is not saved there either: every path that changes it saves before returning, so the only thing
+a save on the way out could do was write megabytes into a metadata directory jdt.ls may already be
+deleting - which is where `ENOTEMPTY` on "clean workspace" came from.
+
+**Declining to import hands the folder to the fallback importer.** jdt.ls asks each importer whether
+it applies, imports with the first one that says yes, and stops only if that importer then reports
+the folder resolved. The importers after this one are gradle, maven, eclipse, and last a fallback
+that claims the folder wholesale and infers a source root per opened file from that file's own
+package declaration - which is where `The declared package "..." does not match the expected package
+""` comes from. So a bazel workspace is reported resolved even when the import provisioned nothing:
+a backoff window, a scope narrowed to a handful of targets and a client that re-initialized mid-round
+are all still bazel workspaces. The single case that does hand the folder on is discovery running,
+succeeding and finding no java at all. For the same reason the backoff window no longer declines to
+apply - it backs off the work, not the claim.
+
+**The workspace can be initialized many times, so an import has to be idempotent and cheap.** A
+language client that ends up in the retry loop described above asks for the workspace to be
+initialized about twice a second for as long as the window is open, and each ask reaches the importer.
+Nothing in this plugin can stop that loop; what it can do is not pay for the repository on every turn
+of it, which is the difference between the failure being noisy and being fatal. A full import within
+seconds of the last one is therefore skipped, keeping the projects already provisioned. That state is
+also what
+[Doctor](server/src/io/github/sorteam/bazel/jdtls/Doctor.java) now names outright: a server
+initialized more than once in the tail of its log, or a client log admitting the fallback to stdio,
+reads as two servers on one workspace rather than as any of the things it looks like.
+
 **The generated projects survive a restart.** jdt.ls's
 `StandardProjectsManager.deleteInvalidProjects` keeps a project only when its location is inside a
 workspace folder, its name is the invisible-project name, or a build support claims it and answers
@@ -382,9 +415,104 @@ so on a fresh clone most of the classpath has never been produced. Dropping them
 makes a fresh clone look like a project with no dependencies, so the count is logged and surfaced in
 the status bar, and `bazelJava.buildOnImport` materialises them.
 
+**Progress is claimed only for the step that is known to be slow.** Answering "does this file need
+importing" reads the discovery cache and takes no lock, so it returns in microseconds even while the
+workspace is being indexed; the import itself runs bazel and takes seconds. The extension therefore
+asks first (`jbazel.importPlan`) and raises a progress notification only for a `needed` answer. Doing
+it in one step meant a spinner reading *importing the package that owns X* while the workspace was at
+63% of its index and the answer, arriving minutes later, was that the file had been imported all
+along.
+
+**A document is resolved once, on its open, and there are two fallbacks waiting for it.** jdt.ls
+resolves a java file to a project when the file is opened - not when a project appears - and if
+nothing covers it then it either builds the per-folder invisible project (linked folder over the whole
+repository, source root guessed from the file's own package declaration, hence `expected package ""`)
+or parks a linked fake compilation unit in its own `jdt.ls-java-project`. Both beat on-demand
+provisioning, because both start from the same `didOpen`. The second one is what a restored editor tab
+hits: measured, 25 tabs across 12 services parked there during the eleven seconds between the server
+reporting itself ready and the import finishing, each then failing forever with `Error in Java Model
+(code 969): ... [in src [in jdt.ls-java-project]]] does not exist`. Clicking the file fixed it because
+clicking it is a fresh open.
+
+Provisioning the project is therefore not the fix, and neither is deleting the project that claimed
+the file: nothing recomputes what was published for that document.
+[InvisibleProject](server/src/io/github/sorteam/bazel/jdtls/InvisibleProject.java) drops the invisible
+project when it is there and asks jdt.ls to `validateDocument` - which starts by re-resolving the
+compilation unit from the URI - and it waits for a real workspace resource to exist first, because a
+file can be inside the imported scope by the discovery cache while its project is still being written,
+and validating then just re-parks it. The extension sweeps the documents that were already open when
+it activated, with a bounded retry, since `onDidOpenTextDocument` never fires for those and the first
+pass can land before the importer has even registered the workspace. A file this plugin genuinely
+cannot place keeps the fallback: for that file a guessed source root beats nothing.
+
 **Discovery is offline first.** IDE indexing has no business fetching image manifests from a
 container registry, so `--nofetch` is tried first and only falls back to a fetching run when it
 produces nothing.
+
+**The classpath container initializer runs inside the client's start budget, so it does nothing.**
+JDT calls it once per project while it restores the java model, and on a *warm* workspace it does
+that inside the `initialize` request - which is inside the 30 s the language client gives the whole
+start before it abandons the server and starts a second one. Measured on a 116-project workspace,
+from the server's own log: a cold start, no projects to restore, answered `initialize` 3.6 s after
+receiving it and finished in 19.9 s; the very next start, same repository and machine but the
+projects now on disk, answered it 16.7 s later and finished in **31.5 s** - one and a half seconds
+over, and everything after that came from those 1.5 s. That is also why the failure reads as "the
+first launch works, the second one does not".
+[BazelClasspathContainerInitializer](server/src/io/github/sorteam/bazel/jdtls/BazelClasspathContainerInitializer.java)
+therefore hands JDT an *empty* container and returns, and the resolve job publishes the real one a
+moment later - the same path a cold import already took, and the same single publish per project
+either way. Empty is a placeholder and not a failure: JDT treats a missing container as a broken
+classpath, an empty one as one with no libraries yet. The time spent handing out placeholders is
+logged in batches, so the next slow start says whether the time went here or somewhere else.
+
+**Whatever holds the platform, the process still has to be able to die.** The invariant below
+describes a state in which nothing in the language server can run - and the exit path is part of
+"nothing": jdt.ls's own ParentProcessWatcher calls `LanguageServer.exit()` and
+`LanguageServerApplication.exit()` *before* scheduling its hard fallback, so a lock held anywhere
+underneath those two calls means the fallback is never scheduled at all. That is why the surviving
+process had to be killed by hand.
+[ExitWatchdog](server/src/io/github/sorteam/bazel/jdtls/ExitWatchdog.java) closes it, and is
+deliberately the least sophisticated thing here: one daemon thread, no job, no scheduling rule, no
+platform API in the loop, `halt` rather than `exit` because a shutdown hook is a thing that can
+block. A watchdog that can be blocked is not a watchdog. It waits well past the language server's
+own ~40 s detection window before acting, because interrupting a legitimate workspace save is how
+metadata gets truncated - the aim is that a process nobody can use is gone within two minutes rather
+than gone quickly. Verified by test rather than by inspection: a JVM is started under a shell, the
+shell is killed, and the JVM is required to still be there through the grace period and then to end
+itself.
+
+**A language server that outlives the editor is not this plugin's shutdown, it is a held job lock.**
+Worth writing down because every symptom of it points elsewhere - java processes still holding
+gigabytes after the window is gone, a start that times out, `clean the workspace` failing with
+`ENOTEMPTY` half way through - and because the diagnosis needs a thread dump, which nobody takes
+until they have lost an afternoon. From one such dump:
+
+```
+Worker.run -> WorkerPool.endJob -> JobManager.endJob
+  -> JobManager.withWriteLock                      <- write lock on the whole job manager, held
+   -> JobListeners.sendEvent -> <extension>.done
+    -> BootProjectTracker.<init> -> processProject -> fireEvent
+     -> JavaClientConnection.executeClientCommand -> CompletableFuture.join   <- never returns
+```
+
+An extension bundle registers a global job-change listener; the platform runs its `done()` callback
+while holding the job manager's write lock, and the callback walks every project making one blocking
+client round trip each, joined with no timeout. With the editor there those calls answer or fail
+fast. With the editor gone nobody answers, the join never returns, the lock is never released, and
+from then on nothing in the platform runs - no workspace save, no shutdown. The process has to be
+killed, and until it is it holds the lock on the language server's workspace directory, which is
+exactly what makes the next start exceed the client's 30 s budget and take the second-server path
+above, and what makes a `clean` stop half way and leave a workspace that is inconsistent rather than
+empty. A workspace in that state then floods the log with `Failed to create linked resource` and
+`does not exist` - thousands of stack traces - and that is the reported out-of-memory.
+
+Nothing here can prevent it, and this plugin is what makes it reachable: the listener's cost is per
+project, and importing a monorepo is how a workspace comes to have a hundred. So
+[Doctor](server/src/io/github/sorteam/bazel/jdtls/Doctor.java) reports the bundle and the project
+count instead of leaving it to be rediscovered. The recovery, once it has happened, is to close the
+editor, kill the surviving server, and delete the language server's workspace directory from a
+shell - the editor's own clean command cannot win a race against a process that is not going to
+exit.
 
 ## Known gaps
 

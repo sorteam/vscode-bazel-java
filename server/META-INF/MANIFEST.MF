@@ -13,5 +13,7 @@ Require-Bundle: org.eclipse.core.runtime,
  org.eclipse.jdt.launching,
  org.eclipse.debug.core,
  org.eclipse.jdt.ls.core,
+ org.eclipse.lsp4j,
  com.google.gson
+Import-Package: org.osgi.framework
 Require-Capability: osgi.ee;filter:="(&(osgi.ee=JavaSE)(version=17))"

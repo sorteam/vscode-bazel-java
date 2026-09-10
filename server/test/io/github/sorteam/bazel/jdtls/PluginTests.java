@@ -6,6 +6,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.TimeUnit;
 import java.util.Map;
 
 /*
@@ -22,6 +23,14 @@ public final class PluginTests {
     private static int checks;
 
     public static void main(String[] args) throws Exception {
+        if (args.length > 0 && "--exit-watchdog-child".equals(args[0])) {
+            // Runs as the subject of theExitWatchdogEndsAnOrphanedServer: arm the watchdog, then
+            // behave like a server that cannot shut down, which is to say do nothing at all.
+            ExitWatchdog.arm();
+            Thread.sleep(Long.MAX_VALUE);
+            return;
+        }
+
         aqueryParserCorrelatesActionsToLabels();
         aqueryParserHandlesNestedBlocksAndEscapes();
         aqueryParserStopsClasspathAtNextFlag();
@@ -55,6 +64,10 @@ public final class PluginTests {
         doctorReadsTheBazelrcAndFindsHeavyDirectories();
         doctorSpotsATruncatedJdtIndex();
         settingsReadBuildJobsAndMavenRepository();
+        shuttingDownTheOwnedServerNeverWaitsForIt();
+        doctorNamesTwoServersOnOneWorkspace();
+        doctorSaysNothingAboutABundleThatIsNotLoaded();
+        theExitWatchdogEndsAnOrphanedServer();
 
         System.out.printf("%d checks, %d failure(s)%n", checks, FAILURES.size());
         FAILURES.forEach(failure -> System.out.println("  FAIL " + failure));
@@ -1147,6 +1160,178 @@ public final class PluginTests {
         check("a workspace with no metadata directory says nothing",
                 Doctor.indexProblems(metadata.resolve("missing"), facts).isEmpty(), "");
         check("nor does a null location", Doctor.indexProblems(null, facts).isEmpty(), "");
+    }
+
+    /*
+        The caller is a JVM shutdown hook: whatever this does, the language server does not exit until
+        it returns, and a server that has not exited still holds the lock on its workspace directory.
+        The next one started there then cannot come up, its client gives up on the transport and
+        starts a second server on the same directory. So "does not wait" is the property under test,
+        not the speed.
+     */
+    private static void shuttingDownTheOwnedServerNeverWaitsForIt() throws Exception {
+        Path root = Files.createTempDirectory("bazel-owned-shutdown");
+        Path log = root.resolve("shutdown-args.txt");
+        Path fake = root.resolve("fake-bazel.sh");
+        Files.writeString(fake, "#!/bin/sh\n"
+                + "for arg in \"$@\"; do echo \"$arg\"; done\n"
+                + "for arg in \"$@\"; do\n"
+                + "  if [ \"$arg\" = shutdown ]; then\n"
+                + "    for a in \"$@\"; do echo \"$a\" >> " + log + "; done\n"
+                + "    sleep 10\n"
+                + "  fi\n"
+                + "done\n");
+        fake.toFile().setExecutable(true);
+        System.setProperty("bazel.binary", fake.toString());
+        try {
+            BazelWorkspace shared = new BazelWorkspace(root.toFile());
+            shared.run(null, "query", "//...");
+            shared.shutdownOwnedServer();
+            check("the developer's own bazel server is left alone", !Files.exists(log),
+                    String.valueOf(Files.exists(log)));
+
+            System.setProperty("bazel.outputBase", root.resolve("ide-base").toString());
+            BazelWorkspace dedicated = new BazelWorkspace(root.toFile());
+            dedicated.run(null, "query", "//...");
+
+            long started = System.nanoTime();
+            dedicated.shutdownOwnedServer();
+            long millis = (System.nanoTime() - started) / 1_000_000L;
+            check("the shutdown is started and abandoned, not waited on", millis < 5_000L,
+                    millis + " ms while the client stays up for 10 s");
+
+            List<String> args = List.of();
+            for (int attempt = 0; attempt < 100 && args.isEmpty(); attempt++) {
+                Thread.sleep(50);
+                if (Files.exists(log)) {
+                    args = Files.readAllLines(log);
+                }
+            }
+            check("it did run, abandoned or not", args.contains("shutdown"), args.toString());
+            check("on the output base this plugin owns",
+                    args.stream().anyMatch(arg -> arg.startsWith("--output_base=")),
+                    args.toString());
+            check("and told not to queue behind whoever holds the lock",
+                    args.contains("--noblock_for_lock"), args.toString());
+        } finally {
+            System.clearProperty("bazel.binary");
+            System.clearProperty("bazel.outputBase");
+        }
+    }
+
+    private static void doctorNamesTwoServersOnOneWorkspace() throws Exception {
+        Path storage = Files.createTempDirectory("jdtls-storage").resolve("redhat.java");
+        Path metadata = storage.resolve("jdt_ws/.metadata");
+        Files.createDirectories(metadata);
+
+        Files.writeString(metadata.resolve(".log"),
+                "!ENTRY org.eclipse.jdt.ls.core 1 0 2026-09-09 16:12:52.000\n"
+                        + "!MESSAGE >> initialize\n"
+                        + "!MESSAGE >> initialized\n");
+        List<String> facts = new ArrayList<>();
+        check("one initialization is a healthy server",
+                Doctor.duplicateServerProblems(metadata, facts).isEmpty(), facts.toString());
+
+        Files.writeString(metadata.resolve(".log"),
+                "!MESSAGE >> initialize\n!MESSAGE >> initialized\n"
+                        + "!MESSAGE >> initialize\n!MESSAGE >> initialized\n");
+        facts.clear();
+        List<String> repeated = Doctor.duplicateServerProblems(metadata, facts);
+        check("being initialized twice is not", repeated.size() == 1, repeated.toString());
+        check("and the count is reported as a fact",
+                facts.stream().anyMatch(fact -> fact.contains("2 times")), facts.toString());
+
+        Files.writeString(metadata.resolve(".log"), "!MESSAGE >> initialize\n");
+        Files.writeString(storage.resolve("client.log.2026-09-09"),
+                "{ message: \"Falling back to 'stdio' (from 'pipe') because starting the pipe"
+                        + " transport failed\" }\n");
+        facts.clear();
+        List<String> fallback = Doctor.duplicateServerProblems(metadata, facts);
+        check("the client naming the fallback is enough on its own", fallback.size() == 1,
+                fallback.toString());
+        check("and the report says which log said so",
+                fallback.get(0).contains("'pipe' to 'stdio'"), fallback.get(0));
+    }
+
+    /*
+        Outside an OSGi framework there is no bundle list to read, and the doctor still has to answer.
+        The check that matters: no framework must mean no claim, not an exception and not a warning
+        about a bundle nobody has.
+     */
+    private static void doctorSaysNothingAboutABundleThatIsNotLoaded() {
+        List<String> facts = new ArrayList<>();
+        List<String> problems = Doctor.blockingBundleProblems(200, facts);
+        check("a bundle that is not loaded is not reported",
+                problems.isEmpty() && facts.isEmpty(), problems + " / " + facts);
+    }
+
+    /*
+        The property under test is the one the whole class exists for: a process whose editor has
+        gone and which is not going to exit on its own does exit. Verified by launching one whose
+        parent is a shell, killing the shell, and waiting - not by reading the code and agreeing
+        with it.
+     */
+    private static void theExitWatchdogEndsAnOrphanedServer() throws Exception {
+        Path work = Files.createTempDirectory("jbazel-watchdog");
+        Path pidFile = work.resolve("child.pid");
+        String classpath = System.getProperty("java.class.path");
+        String java = System.getProperty("java.home") + "/bin/java";
+        String child = String.format(
+                "%s -Djbazel.exitWatchdogSeconds=5 -cp '%s' %s --exit-watchdog-child &"
+                        + " echo $! > '%s'; sleep 120",
+                java, classpath, PluginTests.class.getName(), pidFile);
+
+        Process shell = new ProcessBuilder("/bin/sh", "-c", child)
+                .redirectOutput(ProcessBuilder.Redirect.DISCARD)
+                .redirectError(ProcessBuilder.Redirect.DISCARD)
+                .start();
+        try {
+            long pid = 0;
+            for (int attempt = 0; attempt < 100 && pid == 0; attempt++) {
+                Thread.sleep(100);
+                if (Files.exists(pidFile)) {
+                    String text = Files.readString(pidFile).strip();
+                    if (!text.isEmpty()) {
+                        pid = Long.parseLong(text);
+                    }
+                }
+            }
+            check("the watched process started", pid > 0, String.valueOf(pid));
+            if (pid == 0) {
+                return;
+            }
+            // Give it time to arm before its parent disappears, so the test is about the watchdog
+            // rather than about a race with its own startup.
+            Thread.sleep(1500);
+            ProcessHandle watched = ProcessHandle.of(pid).orElse(null);
+            check("and is alive while its parent is", watched != null && watched.isAlive(),
+                    String.valueOf(watched));
+            if (watched == null) {
+                return;
+            }
+
+            shell.destroyForcibly();
+            shell.waitFor(10, TimeUnit.SECONDS);
+
+            /*
+                Killing the parent must not be what ends the child - otherwise this test would pass
+                with no watchdog at all. On Unix the child is reparented, not signalled, so it has to
+                still be there while the grace period runs.
+             */
+            Thread.sleep(2000);
+            check("the parent dying does not end it by itself", watched.isAlive(),
+                    "gone within 2 s of the parent, before the grace period elapsed");
+
+            boolean ended = false;
+            for (int attempt = 0; attempt < 200 && !ended; attempt++) {
+                Thread.sleep(100);
+                ended = !watched.isAlive();
+            }
+            check("and ends itself once its parent is gone", ended,
+                    ended ? "gone" : "still alive after 20 s");
+        } finally {
+            shell.destroyForcibly();
+        }
     }
 
     private static void settingsReadBuildJobsAndMavenRepository() throws Exception {

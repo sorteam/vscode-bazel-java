@@ -14,10 +14,53 @@ import org.eclipse.jdt.core.IJavaProject;
     following a definition into another service, say. Rather than widening the scope for everyone,
     the single owning package is queried and provisioned on the spot, which costs one scoped query
     instead of a repository-wide import.
+
+    Answering an open comes in two steps, and the split is not an optimisation. Deciding whether
+    anything has to be imported touches nothing but the discovery cache, so it answers in
+    microseconds even while the workspace is being indexed; the import itself runs bazel and takes
+    seconds. Only the second step is worth telling the developer about, and the client can only know
+    which one it is in by asking - which is what plan() is for. Reporting the first step as work is
+    how a spinner ends up on the screen saying a package is being imported when the answer, arriving
+    a moment later, is that it already was.
  */
 public final class LazyImport {
 
+    /* Nothing to do: the file is inside the imported scope. */
+    public static final String COVERED = "covered";
+    /* An import would place this file, and importing it will take bazel time. */
+    public static final String NEEDED = "needed";
+    /* Nothing can be done for this file, quietly - no workspace, no target, or eager mode. */
+    public static final String UNAVAILABLE = "unavailable";
+
     private LazyImport() {
+    }
+
+    /*
+        What opening this file would cost, without spending any of it.
+     */
+    public static String plan(String path) {
+        File file = resolve(path);
+        if (file == null) {
+            return UNAVAILABLE;
+        }
+        BazelSession session = BazelCommandHandler.sessionFor(file);
+        if (session == null) {
+            return UNAVAILABLE;
+        }
+        if (isCovered(session, file)) {
+            replaceFallbackProject(session, file);
+            return COVERED;
+        }
+        if (!session.getSettings().isLazyImport()
+                || session.getDiscoveryGate().shouldSkip()
+                || enclosingPackage(session.getWorkspace().getRoot(), file) == null) {
+            /*
+                Left with jdt.ls's fallback project on purpose. This plugin has nothing to offer the
+                file, and a guessed source root is more than none.
+             */
+            return UNAVAILABLE;
+        }
+        return NEEDED;
     }
 
     public static String forFile(String path, IProgressMonitor monitor) {
@@ -30,6 +73,7 @@ public final class LazyImport {
             return "No bazel workspace owns " + path;
         }
         if (isCovered(session, file)) {
+            replaceFallbackProject(session, file);
             return "Already imported.";
         }
 
@@ -65,7 +109,13 @@ public final class LazyImport {
                             labels.mainLabels(), labels.testLabels(), true);
                 }
             });
+            /*
+                Recorded as part of the imported set, so the next file opened in this package is
+                answered from the cache instead of querying bazel for a package already imported.
+             */
+            session.getStore().addDiscovery(targets);
             session.getStore().save();
+            replaceFallbackProject(session, file);
             return "Imported " + projects.size() + " project(s) for //" + packagePath;
         } catch (CoreException e) {
             if (BazelWorkspace.isServerBusy(e)) {
@@ -76,6 +126,22 @@ public final class LazyImport {
             session.getDiscoveryGate().recordFailure(e.getMessage());
             return "Failed to import //" + packagePath + ": " + e.getMessage();
         }
+    }
+
+    /*
+        The file has, or is about to have, a project of its own - so whichever fallback jdt.ls parked
+        it in when it was opened has to let go of it. See InvisibleProject: this is what turns a
+        restored editor tab from red to resolved without anyone clicking it.
+     */
+    private static void replaceFallbackProject(BazelSession session, File file) {
+        InvisibleProject.reclaim(session.getWorkspace().getRoot(), file);
+    }
+
+    private static File resolve(String path) {
+        if (path == null || path.isBlank()) {
+            return null;
+        }
+        return new File(path);
     }
 
     private static boolean isCovered(BazelSession session, File file) {

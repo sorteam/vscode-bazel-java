@@ -226,6 +226,13 @@ function activate(context) {
   let soon = null;
   context.subscriptions.push({ dispose: () => soon && clearTimeout(soon) });
 
+  /*
+    Outline codicons throughout, not the solid ones. $(alert) and $(warning) are filled triangles and
+    read as an error to act on right now; none of these states is that - a fetch that has to be
+    fixed, a wait on someone else's bazel, a retry, a resolve in flight, jars that were never built.
+    The item sits next to the language server's own indicators, and matching their line weight is the
+    difference between information and alarm.
+  */
   async function refreshStatus() {
     if (soon) {
       clearTimeout(soon);
@@ -247,7 +254,7 @@ function activate(context) {
           build-file scan on every import, and they are what the rest of the repository reads
           generated output through.
         */
-        status.text = "$(alert) JBazel: bazel cannot fetch a repository";
+        status.text = "$(circle-slash) JBazel: bazel cannot fetch a repository";
         status.tooltip =
           "The classpath cannot be resolved until bazel can fetch its external repositories. " +
           "This does not clear on its own - fix it, then editing MODULE.bazel or running " +
@@ -263,7 +270,7 @@ function activate(context) {
           "gives the IDE its own server so the two never queue behind each other.";
         status.show();
       } else if (backoff > 0) {
-        status.text = `$(warning) JBazel: retry in ${backoff}s`;
+        status.text = `$(history) JBazel: retry in ${backoff}s`;
         status.tooltip = entries.map((entry) => entry.discovery).join("\n");
         status.show();
       } else if (resolving > 0) {
@@ -276,7 +283,7 @@ function activate(context) {
         status.show();
         soon = setTimeout(refreshStatus, 1500);
       } else if (missing > 0) {
-        status.text = `$(warning) JBazel: ${missing} jars not built`;
+        status.text = `$(package) JBazel: ${missing} jars not built`;
         status.tooltip = "Run 'JBazel: Build Classpath' to produce them.";
         status.show();
       } else {
@@ -377,17 +384,20 @@ function activate(context) {
   );
 
   /*
-    With a narrowed import scope, opening a file outside it would otherwise get no classpath at all.
-    Asking the server to provision just that package costs one scoped query; the server answers
-    "already imported" cheaply when the file is covered, so this is safe to send on every open.
+    With a narrowed import scope, opening a file outside it would otherwise get no classpath at all -
+    and worse than none, because the language server's own fallback then claims the file and infers a
+    source root from its package declaration. Asking the server to provision just that package costs
+    one scoped query, and the question of whether it needs asking costs nothing, so this is safe to
+    send on every open.
   */
   /*
-    Progress only when there is something to wait for. A file inside the imported scope is answered
-    "Already imported." in milliseconds, and a spinner that flashes on every tab is worse than none;
-    a package that has to be queried and provisioned takes seconds of bazel, and for those seconds
-    silence is indistinguishable from a hang - which is what gets reported as "I open a file and it
-    just does not load". The status bar then carries the classpath resolution that follows, so the
-    two together cover the whole wait rather than its first half.
+    Progress only for the step that is known to be slow. Which step that is comes from the server:
+    importPlan answers from the discovery cache without taking a single lock, so it returns while the
+    workspace is still being indexed, and only a "needed" answer means bazel is about to be run. A
+    spinner raised before that answer is a spinner that says a package is being imported when most of
+    the time nothing is - and, because the answer arrives late while the index is being built, it says
+    so for minutes. The status bar then carries the classpath resolution that follows, so the two
+    together cover the whole wait rather than its first half.
   */
   async function withProgressIfSlow(title, work) {
     const promise = work();
@@ -407,8 +417,8 @@ function activate(context) {
   }
 
   const requested = new Set();
-  context.subscriptions.push(
-    vscode.workspace.onDidOpenTextDocument(async (document) => {
+
+  async function claimDocument(document) {
       if (document.languageId !== "java" || document.uri.scheme !== "file") {
         return;
       }
@@ -419,18 +429,27 @@ function activate(context) {
       const name = path.basename(document.uri.fsPath);
       try {
         /*
-          Awaited before the progress starts, not inside it. Editors restored with the window open
-          their documents before the server is ready, so counting that wait as work put a spinner
-          saying "importing the package that owns X" on the screen while nothing was being imported -
-          and, on a file already inside the imported scope, nothing ever would be.
+          Awaited before anything is sent. Editors restored with the window open their documents
+          before the server is ready, and a request sent into a language client that is still
+          starting is the thing that costs a second server on the same workspace.
         */
         await whenServerReady();
+        const plan = String(
+          (await serverCommand("jbazel.importPlan", document.uri.fsPath)) || ""
+        );
+        if (plan !== "needed") {
+          if (plan !== "covered") {
+            // Backing off, eager mode, or no BUILD file above the file. Any of those can be true
+            // now and false later, so the next open of this file asks again.
+            requested.delete(document.uri.fsPath);
+          }
+          return;
+        }
         const answer = String(
           (await withProgressIfSlow(`JBazel: importing the package that owns ${name}`, () =>
             serverCommand("jbazel.importFile", document.uri.fsPath)
           )) || ""
         );
-        // "Already imported." is the answer for most files and says nothing worth a line.
         if (answer && !answer.startsWith("Already imported")) {
           channel.appendLine(`${name}: ${answer}`);
           refreshStatus();
@@ -439,8 +458,50 @@ function activate(context) {
         // The server may not be up yet; the next file opened will try again.
         requested.delete(document.uri.fsPath);
       }
-    })
-  );
+  }
+
+  context.subscriptions.push(vscode.workspace.onDidOpenTextDocument(claimDocument));
+
+  /*
+    The documents that are already open when this activates, which on a restored window is all of
+    them. onDidOpenTextDocument does not fire for those - this extension activates on the first java
+    document, so that document, and every tab restored with it, has already been opened and already
+    been resolved by the language server against whatever existed at the time, which is nothing.
+    Those are exactly the files that stay red until they are clicked.
+
+    Retried, because the first pass can be too early for a different reason: the server only knows
+    about a bazel workspace once its importer has run, and until then it answers that it can do
+    nothing for the file. Measured on a restored window: eleven seconds between the server reporting
+    itself ready and the import finishing. A single pass inside that window would be a pass that
+    gives up on every tab.
+  */
+  const SWEEP_ATTEMPTS = 8;
+  let sweepTimer = null;
+
+  async function sweepOpenDocuments(attempt) {
+    await Promise.all(vscode.workspace.textDocuments.map(claimDocument));
+    const unclaimed = vscode.workspace.textDocuments.some(
+      (document) =>
+        document.languageId === "java" &&
+        document.uri.scheme === "file" &&
+        !requested.has(document.uri.fsPath)
+    );
+    if (unclaimed && attempt < SWEEP_ATTEMPTS) {
+      sweepTimer = setTimeout(
+        () => sweepOpenDocuments(attempt + 1),
+        Math.min(8000, 1000 * 2 ** attempt)
+      );
+    }
+  }
+
+  context.subscriptions.push({
+    dispose: () => {
+      if (sweepTimer) {
+        clearTimeout(sweepTimer);
+      }
+    },
+  });
+  sweepOpenDocuments(0);
 
   /*
     The server cannot watch BUILD files itself: source folders are linked into the projects at

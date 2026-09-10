@@ -1,9 +1,7 @@
 package io.github.sorteam.bazel.jdtls;
 
-import java.io.File;
-import java.util.LinkedHashSet;
-import java.util.List;
-import java.util.Set;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 
 import org.eclipse.core.runtime.CoreException;
 import org.eclipse.core.runtime.IPath;
@@ -22,15 +20,32 @@ public class BazelClasspathContainerInitializer extends ClasspathContainerInitia
     public static final QualifiedName TARGET_LABEL = ProjectLabels.TARGET_LABEL;
     public static final QualifiedName WORKSPACE_ROOT = ProjectLabels.WORKSPACE_ROOT;
 
-    /*
-        Must not block. JDT calls this while restoring the java model, once per project, and the
-        previous implementation ran a bazel aquery here - which is how a restart cost ~40 s of bazel
-        before the importer had even been asked whether it applies.
+    private static final AtomicInteger PLACEHOLDERS = new AtomicInteger();
+    private static final AtomicLong PLACEHOLDER_NANOS = new AtomicLong();
 
-        The container is published immediately from whatever is already known (memory, then the
-        cache written by the previous session), and anything unresolved is handed to a background
-        job. An empty container is a deliberate placeholder: JDT treats a missing one as a broken
-        classpath, an empty one merely as one with no libraries yet.
+    /*
+        Must not block, and "must not" has a number attached to it.
+
+        JDT calls this once per project while it restores the java model, and on a warm workspace it
+        does that inside the language server's initialize request - so every millisecond spent here
+        is spent inside the budget the language client gives the whole start. That budget is 30 s,
+        after which the client abandons the server and starts a second one on the same workspace
+        directory, which is the single most destructive failure this plugin has to stay clear of.
+
+        Measured on a 116-project workspace, from the server's own log: a cold start, where there are
+        no projects to restore, answered initialize 3.6 s after receiving it and finished the whole
+        start in 19.9 s. The next start - same repository, same machine, projects now on disk -
+        answered it 16.7 s after receiving it and finished in 31.5 s. It missed by a second and a
+        half, and everything that followed came from that. The 13 s of difference is the model
+        restore and the containers built with it, and none of it has to happen before the client is
+        told the server is up.
+
+        So this hands JDT an empty container and nothing else. Empty is a deliberate placeholder,
+        not a failure: JDT treats a *missing* container as a broken classpath, an empty one merely as
+        one with no libraries yet. The real container - from memory, or from the cache the previous
+        session wrote, or from bazel if neither has it - is published by the resolve job a moment
+        later, which is the same path a cold import already used and the same single publish per
+        project either way.
      */
     @Override
     public void initialize(IPath containerPath, IJavaProject javaProject) throws CoreException {
@@ -38,66 +53,31 @@ public class BazelClasspathContainerInitializer extends ClasspathContainerInitia
         if (labels == null) {
             return;
         }
-
+        long started = System.nanoTime();
         BazelSession session = BazelSession.forRoot(labels.rootFile());
-        File executionRoot = knownExecutionRoot(session);
-
-        Set<String> mainJars = new LinkedHashSet<>();
-        Set<String> testJars = new LinkedHashSet<>();
-        boolean complete = collect(session, labels.mainLabels(), mainJars)
-                & collect(session, labels.testLabels(), testJars);
-        testJars.removeAll(mainJars);
-
-        BazelClasspathContainer container = complete && executionRoot != null
-                ? BazelClasspathContainer.fromJars(executionRoot, mainJars, testJars)
-                : BazelClasspathContainer.empty();
 
         JavaCore.setClasspathContainer(containerPath, new IJavaProject[] { javaProject },
-                new IClasspathContainer[] { container }, new NullProgressMonitor());
-        session.getReport().countJars(container.getResolvedCount(), container.getMissingCount(),
-                container.getSourceAttachmentCount());
-
-        if (complete && executionRoot != null) {
-            // Seed the republish guard with what was just handed to JDT, so the next refresh can
-            // tell "identical classpath, keep the container and the index" from a real change.
-            session.setPublishedContainerStamp(javaProject.getProject().getName(),
-                    ContainerStamp.of(executionRoot, mainJars, testJars));
-        } else {
-            ClasspathResolveJob.enqueue(session, javaProject,
-                    labels.mainLabels(), labels.testLabels(), false);
-        }
-    }
-
-    private static boolean collect(BazelSession session, List<String> labels, Set<String> into) {
-        boolean complete = true;
-        for (String label : labels) {
-            List<String> jars = session.getCache().peek(label);
-            if (jars == null) {
-                complete = false;
-                continue;
-            }
-            into.addAll(jars);
-        }
-        return complete;
+                new IClasspathContainer[] { BazelClasspathContainer.empty() },
+                new NullProgressMonitor());
+        ClasspathResolveJob.enqueue(session, javaProject,
+                labels.mainLabels(), labels.testLabels(), false);
+        recordPlaceholder(System.nanoTime() - started);
     }
 
     /*
-        The execution root is needed to turn the relative paths aquery reports into absolute ones.
-        Asking bazel for it is a process launch, so the value persisted by the previous session is
-        used when it still points at a real directory.
+        Reported in batches rather than per project, and reported at all because the cost of this
+        method is the cost of the start: if the next warm start is slow again, the log has to say
+        whether the time went here or somewhere else. One line per 25 projects is enough to see the
+        shape and cheap enough to leave switched on.
      */
-    private static File knownExecutionRoot(BazelSession session) {
-        File cached = session.getWorkspace().peekExecutionRoot();
-        if (cached != null) {
-            return cached;
+    private static void recordPlaceholder(long nanos) {
+        long total = PLACEHOLDER_NANOS.addAndGet(nanos);
+        int count = PLACEHOLDERS.incrementAndGet();
+        if (count % 25 == 0) {
+            BazelLog.info(String.format(
+                    "JBazel: handed JDT %d placeholder container(s) in %d ms total; the resolved"
+                            + " ones follow in the background", count, total / 1_000_000L));
         }
-        String stored = session.getStore().peekExecutionRoot();
-        if (!stored.isBlank() && new File(stored).isDirectory()) {
-            File root = new File(stored);
-            session.getWorkspace().setExecutionRoot(root);
-            return root;
-        }
-        return null;
     }
 
     @Override

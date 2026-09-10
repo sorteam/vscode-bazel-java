@@ -39,6 +39,7 @@
          <command id="jbazel.fetchLibrarySources"/>
          <command id="jbazel.doctor"/>
          <command id="jbazel.importFile"/>
+         <command id="jbazel.importPlan"/>
          <command id="jbazel.status"/>
          <command id="jbazel.buildFilesChanged"/>
          <command id="jbazel.syncClasspathJars"/>

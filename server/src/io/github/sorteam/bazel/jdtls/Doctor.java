@@ -16,6 +16,8 @@ import org.eclipse.core.resources.ResourcesPlugin;
 import org.eclipse.core.runtime.IPath;
 import org.eclipse.jdt.ls.core.internal.JavaLanguageServerPlugin;
 import org.eclipse.jdt.ls.core.internal.preferences.PreferenceManager;
+import org.osgi.framework.Bundle;
+import org.osgi.framework.BundleContext;
 
 /*
     One report answering "why is this repository slow / noisy / red", from the side of the setup that
@@ -184,7 +186,79 @@ final class Doctor {
 
         problems.addAll(bazelrcProblems(root, facts));
         problems.addAll(indexProblems(metadataDirectory(), facts));
+        problems.addAll(duplicateServerProblems(metadataDirectory(), facts));
+        problems.addAll(blockingBundleProblems(projects, facts));
         return format(problems, facts);
+    }
+
+    /*
+        A language server extension that cannot exit is the most expensive failure on this list, and
+        the only warning of it is a process still holding gigabytes after the editor is gone.
+
+        The mechanism, from a thread dump of one such process: an extension bundle registers a global
+        job-change listener, and its done() callback - which the platform runs from inside
+        JobManager.withWriteLock, holding the write lock on the whole job manager - walks every
+        project in the workspace and makes one *blocking* client round trip each
+        (JavaClientConnection.executeClientCommand, joined with no timeout). While the editor is
+        there those calls answer or fail fast. When the editor has gone away there is nobody left to
+        answer, the join never returns, the job manager's write lock is never released, and from that
+        moment nothing in the platform can run: the workspace cannot be saved and the process cannot
+        shut down. It has to be killed, and until it is it keeps the lock on the language server's
+        workspace directory - which is what makes the next start time out and "clean the workspace"
+        fail with ENOTEMPTY half way through, leaving a workspace that is inconsistent rather than
+        empty.
+
+        Nothing in this plugin can prevent that, and this plugin is what makes it reachable: the
+        listener's cost is per project, and importing a monorepo is how a workspace comes to have a
+        hundred of them. So it is reported, with the project count that decides how bad it is, rather
+        than left to be rediscovered from a thread dump.
+     */
+    private static final String BLOCKING_BUNDLE = "org.springframework.tooling.jdt.ls.extension";
+
+    static List<String> blockingBundleProblems(int projects, List<String> facts) {
+        List<String> problems = new ArrayList<>();
+        String version = bundleVersion(BLOCKING_BUNDLE);
+        if (version == null) {
+            return problems;
+        }
+        facts.add("blocking-listener   : " + BLOCKING_BUNDLE + " " + version + " is loaded");
+        if (projects < 20) {
+            return problems;
+        }
+        problems.add(BLOCKING_BUNDLE + " " + version + " is loaded alongside " + projects
+                + " projects.\n"
+                + "      It registers a job-change listener whose callback runs while the platform's"
+                + " job-manager\n"
+                + "      write lock is held, and makes one blocking client round trip per project"
+                + " with no\n"
+                + "      timeout. If the editor closes during that walk the round trip never"
+                + " answers, the lock is\n"
+                + "      never released, and the language server cannot exit - it has to be killed,"
+                + " and until it\n"
+                + "      is it holds the lock on this workspace directory, which is what makes the"
+                + " next start\n"
+                + "      time out and 'clean the workspace' fail half way through. Disable that"
+                + " extension for\n"
+                + "      this workspace if the language server keeps outliving the editor.");
+        return problems;
+    }
+
+    /* Reads the OSGi framework rather than the extension list: this is about what got loaded. */
+    private static String bundleVersion(String symbolicName) {
+        try {
+            BundleContext context = JavaLanguageServerPlugin.getBundleContext();
+            if (context == null) {
+                return null;
+            }
+            for (Bundle bundle : context.getBundles()) {
+                if (symbolicName.equals(bundle.getSymbolicName())) {
+                    return String.valueOf(bundle.getVersion());
+                }
+            }
+        } catch (RuntimeException | LinkageError e) {
+            return null;
+        }
+        return null;
     }
 
     /*
@@ -257,19 +331,102 @@ final class Doctor {
         return problems;
     }
 
-    /* Bounded: only the last stretch of the log, which is where a recurring failure lives. */
     private static boolean logMentionsCorruptIndex(Path log) {
-        if (!Files.isRegularFile(log)) {
+        return logTail(log).contains("Failed to read index data");
+    }
+
+    /*
+        Two language servers on one workspace directory, which is a state nothing inside the server
+        can see and nothing inside it can end.
+
+        The language client starts the server over a pipe and gives the whole start - process, pipe,
+        initialize, feature registration - thirty seconds. On a machine already short of memory that
+        budget runs out, and what happens then is that a second server is started on the same
+        directory over stdio while the first one is left running. The second client then tries to
+        register the commands the first one has already registered, fails, and retries: every retry
+        re-initializes the workspace, so the server re-imports, re-indexes and writes another
+        megabyte of log, for as long as the window stays open. Both servers also share one JDT index,
+        which is how the index ends up truncated.
+
+        Worth naming because every symptom of it points somewhere else - java processes that will not
+        die, a machine out of memory, an import that runs over and over - and because the recovery is
+        not obvious: closing the window is not enough while a second window still holds a server on
+        the same directory.
+
+        Both signals are cheap and both are decisive. A healthy server logs ">> initialize" once per
+        process; the client writes one line naming the fallback the moment it takes it.
+     */
+    static List<String> duplicateServerProblems(Path metadata, List<String> facts) {
+        List<String> problems = new ArrayList<>();
+        if (metadata == null) {
+            return problems;
+        }
+        int initializations = occurrences(logTail(metadata.resolve(".log")), ">> initialize\n");
+        boolean fellBack = clientLogReportsStdioFallback(metadata);
+        if (initializations > 1) {
+            facts.add("server initialized  : " + initializations
+                    + " times in the tail of the log (once is normal)");
+        }
+        if (initializations > 1 || fellBack) {
+            problems.add("The language client started a second language server on this workspace"
+                    + " directory\n"
+                    + "      " + (fellBack
+                            ? "(its log names the fallback from 'pipe' to 'stdio')"
+                            : "(the server log shows it being initialized repeatedly)")
+                    + " and left the first one running. The two\n"
+                    + "      share one JDT index and neither of them will settle. Close every"
+                    + " window open on this\n"
+                    + "      repository, wait for the java processes to exit, and reopen one. This is"
+                    + " the language\n"
+                    + "      client's own start timeout, not the import: it runs out on a machine"
+                    + " already short of\n"
+                    + "      memory, which the previous occurrence of this leaves it.");
+        }
+        return problems;
+    }
+
+    /*
+        The client's log sits beside the workspace directory rather than inside it, because it is
+        written by the extension host and not by the server.
+     */
+    private static boolean clientLogReportsStdioFallback(Path metadata) {
+        Path directory = metadata.getParent() == null ? null : metadata.getParent().getParent();
+        if (directory == null || !Files.isDirectory(directory)) {
             return false;
+        }
+        try (var stream = Files.newDirectoryStream(directory, "client.log*")) {
+            for (Path log : stream) {
+                if (logTail(log).contains("Falling back to 'stdio'")) {
+                    return true;
+                }
+            }
+        } catch (IOException e) {
+            return false;
+        }
+        return false;
+    }
+
+    private static int occurrences(String text, String needle) {
+        int found = 0;
+        for (int at = text.indexOf(needle); at >= 0; at = text.indexOf(needle, at + 1)) {
+            found++;
+        }
+        return found;
+    }
+
+    /* Bounded: only the last stretch of the log, which is where a recurring failure lives. */
+    private static String logTail(Path log) {
+        if (log == null || !Files.isRegularFile(log)) {
+            return "";
         }
         try (java.io.RandomAccessFile handle = new java.io.RandomAccessFile(log.toFile(), "r")) {
             long from = Math.max(0, handle.length() - LOG_TAIL_BYTES);
             handle.seek(from);
             byte[] tail = new byte[(int) Math.min(LOG_TAIL_BYTES, handle.length() - from)];
             handle.readFully(tail);
-            return new String(tail, StandardCharsets.UTF_8).contains("Failed to read index data");
+            return new String(tail, StandardCharsets.UTF_8);
         } catch (IOException e) {
-            return false;
+            return "";
         }
     }
 

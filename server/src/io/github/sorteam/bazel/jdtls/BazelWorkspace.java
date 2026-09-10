@@ -560,6 +560,17 @@ public class BazelWorkspace {
     /*
         Only ever shuts down a server this plugin owns. The shared server belongs to the developer's
         terminal and killing it would cancel their build.
+
+        Started and abandoned, deliberately. The caller is a JVM shutdown hook, and a shutdown hook
+        that waits is a language server that does not exit: the bazel client here blocks on the
+        output base lock for as long as whoever holds it keeps it, and reading the child's output to
+        EOF has no timeout at all. A server that takes tens of seconds to die is not a slow exit, it
+        is an orphan - and it still holds the lock on the -data directory the next server is about to
+        be started on, which makes that one time out and the client fall back to a second transport
+        on the same directory. So nothing here is waited on, and nothing here is logged: the exit
+        writes no more log lines either way, and --noblock_for_lock keeps the abandoned client from
+        sitting on the lock behind a running build. The dedicated server's --max_idle_secs is what
+        actually guarantees it goes away.
      */
     public void shutdownOwnedServer() {
         BazelSettings current = settings;
@@ -567,17 +578,14 @@ public class BazelWorkspace {
             return;
         }
         List<String> command = List.of(BazelBinary.resolve(current),
-                "--output_base=" + outputBaseDirectory(current), "shutdown");
+                "--output_base=" + outputBaseDirectory(current), "--noblock_for_lock", "shutdown");
         try {
-            Process process = new ProcessBuilder(command).directory(root)
-                    .redirectErrorStream(true).start();
-            process.getInputStream().readAllBytes();
-            process.waitFor(30, TimeUnit.SECONDS);
-            BazelLog.info("JBazel: shut down the IDE-owned server for " + root);
-        } catch (IOException e) {
-            BazelLog.info("JBazel: could not shut down the IDE-owned server: " + e);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
+            new ProcessBuilder(command).directory(root)
+                    .redirectOutput(ProcessBuilder.Redirect.DISCARD)
+                    .redirectError(ProcessBuilder.Redirect.DISCARD)
+                    .start();
+        } catch (IOException | RuntimeException e) {
+            // Nothing to fall back to and nobody left to tell: --max_idle_secs covers the server.
         }
     }
 

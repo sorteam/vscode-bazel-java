@@ -23,6 +23,13 @@ public final class BazelSession {
         always get a clean OSGi stop - it exits through "Parent process stopped running, forcing
         server exit" - so the hook is registered on the JVM, which covers both paths. It only ever
         touches a server this plugin started under its own output base.
+
+        Whatever runs here has to be non-blocking, and that is a hard requirement rather than a
+        preference: the JVM does not exit until every shutdown hook returns, and a language server
+        that does not exit keeps the lock on its -data directory. The next server started on that
+        directory then waits for a lock that a dead-but-not-gone process still holds, its transport
+        never comes up, and the client concludes the start failed - which is how one slow hook turns
+        into two servers on one workspace. See shutdownOwnedServer for what that meant in practice.
      */
     static {
         Runtime.getRuntime().addShutdownHook(new Thread(BazelSession::shutdownAll, "bazel-shutdown"));
@@ -139,10 +146,14 @@ public final class BazelSession {
         BazelLog.clearAll();
     }
 
+    /*
+        The store is deliberately not saved here. Every path that changes it - the importer, the
+        resolve job, the discovery refresh, a lazy import - saves before it returns, and save() is a
+        no-op when nothing is dirty, so a save on the way out could only ever repeat work that has
+        already been done. What it did do was write megabytes into a metadata directory jdt.ls may
+        already be deleting, which is where the ENOTEMPTY on "clean workspace" came from.
+     */
     public static void shutdownAll() {
-        SESSIONS.values().forEach(session -> {
-            session.store.save();
-            session.workspace.shutdownOwnedServer();
-        });
+        SESSIONS.values().forEach(session -> session.workspace.shutdownOwnedServer());
     }
 }

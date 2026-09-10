@@ -16,8 +16,15 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 # garbage length fields ("Failed to read index data ... size 1349676899"), and JDT allocates them.
 # Measured once, and once was enough - two orphaned servers at 8.4 GB and 2.7 GB, a corrupt index and
 # a full reindex to recover.
-if pgrep -f "Visual Studio Code.app/Contents/MacOS/Electron" >/dev/null 2>&1 \
-  || pgrep -f "redhat.java-.*/jre/.*/bin/java" >/dev/null 2>&1; then
+# Both process names, because the executable was renamed between VS Code releases: 1.136 ran the
+# main process as MacOS/Electron, 1.137 runs it as MacOS/Code. Matching only the first meant this
+# guard silently stopped guarding - and an install that goes through under a running editor is
+# exactly the two-servers-on-one-workspace case it exists to prevent. The language server processes
+# are matched too, since they outlive the editor when the platform deadlocks.
+if pgrep -f "Visual Studio Code.app/Contents/MacOS/(Electron|Code)$" >/dev/null 2>&1 \
+  || pgrep -f "Visual Studio Code.app/Contents/MacOS/Electron" >/dev/null 2>&1 \
+  || pgrep -f "Visual Studio Code.app/Contents/MacOS/Code" >/dev/null 2>&1 \
+  || pgrep -f "equinox.launcher" >/dev/null 2>&1; then
   if [ -z "${FORCE:-}" ]; then
     echo "error: VS Code is running. Installing over it can leave two language servers on one" >&2
     echo "       workspace and a corrupt JDT index; quit VS Code first." >&2
@@ -48,6 +55,43 @@ if [ -z "$CODE" ]; then
   exit 0
 fi
 
+ID="$(python3 - "$HERE/extension/package.json" <<'PYEOF'
+import json, sys
+d = json.load(open(sys.argv[1]))
+print(d["publisher"] + "." + d["name"])
+PYEOF
+)"
+
+# Uninstalled first, deliberately. "--install-extension --force" over a vsix carrying the version
+# that is already installed marks the existing directory obsolete and unpacks into the same
+# directory name, and what is left is an extension folder listed in .obsolete and absent from
+# extensions.json - installed as far as this script can see, gone as far as VS Code is concerned. The
+# jdt.ls bundle then never reaches the language server, and on a monorepo that is not a quiet
+# degradation: with no importer to fence off the output tree, jdt.ls's own gradle, maven and eclipse
+# detection walks the whole repository through the bazel symlinks. Measured on this failure, from the
+# server's own log: "Workspace initialized in 101469ms", twice, and a language client that gave up
+# and restarted in between.
+if "$CODE" --list-extensions 2>/dev/null | grep -qx "$ID"; then
+  echo "==> removing the installed $ID first"
+  "$CODE" --uninstall-extension "$ID" >/dev/null 2>&1 || true
+fi
+
 echo "==> installing $VSIX"
 "$CODE" --install-extension "$VSIX" --force
+
+# Verified rather than trusted, because the failure above is silent from here: the CLI reports
+# success either way.
+if ! "$CODE" --list-extensions 2>/dev/null | grep -qx "$ID"; then
+  echo "error: $ID installed but VS Code does not list it. Remove" >&2
+  echo "         ~/.vscode/extensions/$ID-*" >&2
+  echo "       and the matching entry from ~/.vscode/extensions/.obsolete, then re-run." >&2
+  exit 1
+fi
+OBSOLETE="$HOME/.vscode/extensions/.obsolete"
+if [ -s "$OBSOLETE" ] && grep -q "\"$ID-" "$OBSOLETE"; then
+  echo "error: VS Code has $ID marked obsolete; it will not load." >&2
+  echo "       Delete $OBSOLETE and re-run." >&2
+  exit 1
+fi
+echo "==> $ID installed and registered"
 echo "==> reload the VS Code window"

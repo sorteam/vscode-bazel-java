@@ -1,5 +1,127 @@
 # Changelog
 
+## 0.8.3
+
+- **The second launch of a workspace no longer takes longer than the language client will wait.**
+  JDT initializes one classpath container per project while it restores the java model, and on a warm
+  workspace it does that inside the `initialize` request - inside the 30 s the client gives the whole
+  start before it abandons the server and starts a second one on the same workspace directory.
+  Measured on a 116-project workspace: a cold start answered `initialize` 3.6 s after receiving it
+  and finished in 19.9 s; the next start, same repository and machine with the projects now on disk,
+  answered it 16.7 s later and finished in 31.5 s. One and a half seconds over - and the duplicate
+  server, the command-registration collision, the retry loop and the memory that followed all came
+  from that. It is also exactly why the failure looked like "the first launch is fine, the second one
+  is not".
+
+  The initializer now hands JDT an empty placeholder container and returns; the resolve job publishes
+  the real one immediately afterwards, off the start path. That is the path a cold import already
+  used, and it is still one publish per project, so nothing is indexed twice. How long the
+  placeholders took is logged in batches, so a slow start says where the time actually went.
+
+- **`install.sh` guards against a running editor again.** It looked for the main process as
+  `MacOS/Electron`, which is what VS Code 1.136 was called; 1.137 renamed it to `MacOS/Code`, and the
+  guard had silently stopped guarding. Installing over a running editor replaces a bundle under a
+  live language server, which is the two-servers-on-one-workspace case the guard exists to prevent.
+  Both names are matched now, and so are the language server processes, which outlive the editor when
+  the platform deadlocks.
+
+- **A language server that cannot shut down now ends itself instead of being killed by hand.** The
+  state described below leaves nothing in the platform able to run, and the exit path is part of
+  nothing: the language server's own parent-process watcher calls `LanguageServer.exit()` and
+  `LanguageServerApplication.exit()` before it schedules its hard fallback, so a lock held under
+  either of those means the fallback is never scheduled. Measured: a process whose editor had closed,
+  reparented to init, 1.4 GB resident, still there four minutes later.
+
+  That process is not just wasted memory - it holds the lock on its own workspace directory, which is
+  what makes the *next* start exceed the client's 30 s budget and take the two-server path, and what
+  makes "clean the workspace" stop half way and leave a workspace that is inconsistent rather than
+  empty. So the plugin now runs a watchdog: one daemon thread, no job, no scheduling rule, nothing in
+  its loop that a platform lock can block, and `halt` rather than `exit` because a shutdown hook is a
+  thing that can block. It waits well past the language server's own ~40 s detection window, since
+  interrupting a legitimate workspace save is itself how metadata gets truncated. Covered by a test
+  that starts a JVM under a shell, kills the shell, and requires the JVM to survive the grace period
+  and then end itself.
+
+- **`JBazel: Doctor` names the reason a language server outlives the editor.** Measured from a thread
+  dump of a server still holding 1.4 GB with the editor closed and its parent gone: an extension
+  bundle's job-change listener runs inside `JobManager.withWriteLock`, walks every project, and makes
+  one blocking client round trip per project with no timeout. With the editor gone nothing answers,
+  the join never returns, the job manager's write lock is never released, and the process can no
+  longer save the workspace or shut down - it has to be killed. Until it is, it holds the lock on the
+  language server's workspace directory, which is what makes the next start exceed the client's 30 s
+  budget (and take the two-server path) and what makes "clean the workspace" stop half way with
+  `ENOTEMPTY`, leaving a workspace that is inconsistent rather than empty - after which the log fills
+  with thousands of `Failed to create linked resource` and `does not exist` traces, which is the
+  out-of-memory. Nothing in this plugin can prevent that, and this plugin is what makes it reachable:
+  the listener's cost is per project. So the doctor reports the bundle and the project count.
+
+- **The language server exits when it is told to, so the next one can start.** Shutting down an
+  IDE-owned bazel server was done from a JVM shutdown hook, and it waited: it read the client's
+  output to EOF with no timeout, on a `bazel shutdown` that blocks for as long as whoever holds the
+  output base keeps it. The JVM does not exit until every hook returns, so this was a language server
+  that could take tens of seconds to die, or not die at all - and one that has not died still holds
+  the lock on its `-data` directory. The shutdown is now started and abandoned, with
+  `--noblock_for_lock`; `--max_idle_secs` is what guarantees the server goes away. The cache is no
+  longer saved from the hook either: every path that changes it already saves before returning, so
+  the save on the way out could only write megabytes into a metadata directory jdt.ls may already be
+  deleting - which is where `ENOTEMPTY` on "clean workspace" came from.
+
+- **Initializing the workspace repeatedly no longer costs the repository each time.** When a language
+  client's start runs past its 30 s budget it starts a second server on the same workspace directory
+  and leaves the first running; the second one then collides with the commands the first registered
+  and retries, which re-initializes the workspace about twice a second for as long as the window is
+  open. Nothing in this plugin can stop that loop, but paying for a full import on every turn of it is
+  what made it fatal rather than noisy: measured at ~600 full imports of 116 projects in five minutes,
+  with 11 MB of server log to match. A full import within seconds of the last one is now skipped,
+  keeping the projects already provisioned. `JBazel: Doctor` also names the state outright now,
+  because every symptom of it points somewhere else - java processes that will not die, a machine out
+  of memory, an import that runs over and over.
+
+- **A file outside the import scope no longer resolves against a guessed source root.** Two separate
+  causes, one symptom - `The declared package "..." does not match the expected package ""`.
+
+  jdt.ls asks each importer whether it applies and stops only when one reports the folder *resolved*;
+  after this importer come gradle, maven, eclipse and a fallback that claims the folder wholesale.
+  Reporting "resolved" was conditional on having provisioned at least one project, so a narrowed
+  import scope, a backoff window after a failed query, or a client that re-initialized mid-round all
+  handed the whole repository to that fallback. A bazel workspace is now reported resolved even when
+  the import provisioned nothing; the one case that hands the folder on is discovery running,
+  succeeding, and finding no java at all.
+
+  The fallback project is also created on the *open* of a file no project covers, which is a race
+  on-demand importing cannot win - both start from the same `didOpen`. Once it exists its linked
+  folder covers the whole repository, so every file maps to two resources and which one wins is
+  iteration order. It is now dropped as soon as the file that provoked it has a real project. A file
+  that genuinely cannot be placed keeps the fallback - for that file a guessed source root beats
+  nothing.
+
+- **A file that was already open when the window opened no longer stays red until it is clicked.**
+  jdt.ls resolves a document exactly once, on its open, and it has a second fallback for a file no
+  project covers: a linked "fake compilation unit" in its own `jdt.ls-java-project`. On a restored
+  window every tab is opened before this plugin's import has provisioned anything, so every tab
+  landed there - measured: 25 tabs across 12 services, each one then failing forever with
+  `Error in Java Model (code 969): X.java [in ... [in src [in jdt.ls-java-project]]] does not exist`.
+  Clicking the file worked because clicking it is a fresh open.
+
+  Provisioning the project does not fix it on its own, and neither does deleting the project that
+  claimed the file: nothing recomputes what was published for that document. So the plugin now asks
+  jdt.ls to validate the document again - `validateDocument` re-resolves the compilation unit from
+  the URI, which is the step that has to be repeated - and it waits for a real workspace resource to
+  exist before asking, since a file can be inside the imported scope by the cache while its project
+  is still being written. The extension also sweeps the documents that were already open when it
+  activated, retrying while the server still reports that it knows nothing about the workspace:
+  `onDidOpenTextDocument` never fires for those, and the gap between the server reporting itself
+  ready and the import finishing was eleven seconds on the repository this was measured on.
+
+- **The spinner on opening a file tells the truth.** Deciding whether a file needs importing reads the
+  discovery cache and takes no lock, so it answers in microseconds even mid-index; the import itself
+  runs bazel and takes seconds. Both used to be one request with one progress notification, which put
+  *importing the package that owns X* on the screen while the workspace was at 63% of its index and
+  the answer, arriving minutes later, was that the file had been imported all along. The extension now
+  asks first and raises progress only for the step that will actually run bazel. An on-demand import
+  is also recorded in the discovery cache, so the next file opened in that package is answered from
+  the cache instead of querying bazel for a package already imported.
+
 ## 0.8.2
 
 - **A jar that bazel rebuilt is re-read, so a class built a minute ago is a class the editor knows

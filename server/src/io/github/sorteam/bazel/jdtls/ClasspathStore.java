@@ -7,9 +7,11 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 import org.eclipse.core.resources.ResourcesPlugin;
@@ -206,6 +208,26 @@ public final class ClasspathStore {
         discovery.clear();
         discovery.addAll(targets);
         dirty = true;
+    }
+
+    /*
+        Adds to the discovery instead of replacing it, for the one caller that widens the imported
+        set rather than redefining it: an on-demand import of a single package. Without this the
+        package is provisioned but not remembered, so the next file opened in it queries bazel again
+        for something already imported.
+     */
+    public synchronized void addDiscovery(List<BazelQuery.Target> targets) {
+        load();
+        Set<String> known = new HashSet<>();
+        for (BazelQuery.Target target : discovery) {
+            known.add(target.label());
+        }
+        for (BazelQuery.Target target : targets) {
+            if (known.add(target.label())) {
+                discovery.add(target);
+                dirty = true;
+            }
+        }
     }
 
     public synchronized void setExecutionRoot(String value) {

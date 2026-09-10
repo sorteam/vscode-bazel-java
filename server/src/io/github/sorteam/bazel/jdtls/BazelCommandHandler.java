@@ -30,6 +30,7 @@ public class BazelCommandHandler implements IDelegateCommandHandler {
     public static final String FETCH_SOURCES = "jbazel.fetchLibrarySources";
     public static final String DOCTOR = "jbazel.doctor";
     public static final String IMPORT_FILE = "jbazel.importFile";
+    public static final String IMPORT_PLAN = "jbazel.importPlan";
     public static final String STATUS = "jbazel.status";
     public static final String BUILD_FILES_CHANGED = "jbazel.buildFilesChanged";
     public static final String SYNC_JARS = "jbazel.syncClasspathJars";
@@ -50,6 +51,8 @@ public class BazelCommandHandler implements IDelegateCommandHandler {
                 return doctor();
             case IMPORT_FILE:
                 return LazyImport.forFile(stringArgument(arguments, 0), monitor);
+            case IMPORT_PLAN:
+                return LazyImport.plan(stringArgument(arguments, 0));
             case STATUS:
                 return status();
             case BUILD_FILES_CHANGED:
