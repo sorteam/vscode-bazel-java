@@ -157,17 +157,47 @@ holding is compared entry by entry first, because a stamp can be stale for reaso
 about the classpath - its own format changed in an upgrade, the metadata was cleaned - and acting on
 that would reindex everything to publish what JDT already has.
 
-**A start that runs long is a start the client abandons - with a second server.** redhat.java races
-the LSP handshake against a 30 s timeout (`pipeStartTimeout: 3e4`) and, on timeout, builds a new
-language client over stdio and starts it **without stopping the first**: two language servers then
-run on one `-data` directory. They write one JDT index, and it does not survive that - it comes back
-with garbage length fields (`Failed to read index data ... size 1349676899`) which JDT allocates,
-so the symptom is a language server at 8 GB and an editor that resolves nothing. The client also
-reports it as `command 'sts.java.addClasspathListener' already exists`, because the second client
-re-registers commands the first one already registered. Nothing in this plugin can undo that, which
-is why keeping the start short is a correctness requirement here and not a nicety, and why
-`java.transport: "stdio"` is worth setting on a large workspace: with the transport already stdio,
-redhat.java skips the race entirely.
+**Starting the editor must not start a build.** This is the invariant the plugin broke, and it broke
+it in the least visible way: not by being slow inside a request, but by doing repository-scale work
+in the seconds *after* the language server reported itself ready. Every start ran an aquery over
+every discovered label, a cquery over every label for the runtime classpath, and - because
+`buildOnImport` meant "once per session", and a session is every time a window is opened - a bazel
+build of every discovered target. On a workspace whose cached import was valid, whose jars were all
+on disk and whose containers JDT had already restored, none of it changed anything: measured on a
+116-project workspace, 233 labels analysed, 232 more for the runtime pass, a build of 233 targets,
+and **0 containers published**. With a warm bazel server that is about four seconds. With a cold one
+- the first start after a reboot, after a branch switch, after anything that dropped the analysis
+cache - it is a full analysis and build of the repository: minutes of every core and gigabytes of
+memory, spent while the editor is still starting the rest of its language servers.
+
+The cause was a cache lookup that only ever consulted memory.
+[BazelClasspathCache](server/src/io/github/sorteam/bazel/jdtls/BazelClasspathCache.java) decided
+what to query by checking its own map, which is empty in a new process, so the answers written to
+disk by the previous session were never seen and every label counted as unknown. The store is now
+consulted before bazel is, the background build is started only for labels whose classpath entries
+are genuinely absent from disk, and the build-file digest is walked only when something is going to
+be stamped with it. A start where nothing changed now runs **no bazel at all** - verified by pointing
+`bazel.binary` at a wrapper that logs its invocations and counting zero.
+
+**A start that runs long is a start the client abandons - with a second server.** This is why the
+invariant above is a correctness requirement and not a performance note. redhat.java races the LSP
+handshake against a 30 s timeout (`pipeStartTimeout: 3e4`) and, on timeout, builds a new language
+client over stdio and starts it **without stopping the first**: two language servers then run on one
+`-data` directory. They write one JDT index and it does not survive that - it comes back with
+garbage length fields (`Failed to read index data ... size 1349676899`) which JDT allocates. The
+client reports it as `command 'sts.java.addClasspathListener' already exists`, because the second
+client re-registers commands the first one already registered, and redhat.java's
+`initializationFailedHandler` answers *retry* to that error - so the second client re-sends
+`initialize` for as long as the window is open: measured at 15 attempts a second, 2054 failures in
+three and a half minutes, 300 workspace re-initializations per 20 s of server log, and a language
+server at 9.3 GB. That is the reported out-of-memory.
+
+Nothing in this plugin can undo that once it has started, and nothing in this plugin should ever be
+what causes it. Measured on the same warm 116-project workspace, from spawn to the `initialize`
+response: an empty workspace 3.84 s, the real one with no bazel bundle loaded at all 4.52 s, with
+this plugin 4.20 s, with this plugin and a bazel binary that sleeps 45 s per call 4.84 s, and with a
+second language server already running on the same `-data` 5.80 s. The handshake is not where this
+plugin can lose the race. The machine it leaves for the *next* window to start on is.
 [BuildClasspathJob](server/src/io/github/sorteam/bazel/jdtls/BuildClasspathJob.java) additionally
 fingerprints the jars around its build so an up-to-date build does not even trigger a refresh, and a
 build that did rewrite jars re-resolves those classpaths directly instead of forcing a discovery
@@ -449,21 +479,29 @@ cannot place keeps the fallback: for that file a guessed source root beats nothi
 container registry, so `--nofetch` is tried first and only falls back to a fetching run when it
 produces nothing.
 
-**The classpath container initializer runs inside the client's start budget, so it does nothing.**
-JDT calls it once per project while it restores the java model, and on a *warm* workspace it does
-that inside the `initialize` request - which is inside the 30 s the language client gives the whole
-start before it abandons the server and starts a second one. Measured on a 116-project workspace,
-from the server's own log: a cold start, no projects to restore, answered `initialize` 3.6 s after
-receiving it and finished in 19.9 s; the very next start, same repository and machine but the
-projects now on disk, answered it 16.7 s later and finished in **31.5 s** - one and a half seconds
-over, and everything after that came from those 1.5 s. That is also why the failure reads as "the
-first launch works, the second one does not".
+**The classpath container initializer runs inside the client's start budget, so it hands back what
+JDT already has.** JDT calls it once per project while it restores the java model, and on a *warm*
+workspace it does that before `initialize` can even be handled: jdt.ls schedules
+`JavaCore.initializeAfterLoad` from its plugin start and makes `handleInitialize` wait for it. So the
+initializer runs inside the 30 s the language client gives the whole start. Measured on a
+116-project workspace, from the server's own log: a cold start, no projects to restore, answered
+`initialize` 3.6 s after receiving it and finished in 19.9 s; the very next start, same repository
+and machine but the projects now on disk, answered it 16.7 s later and finished in **31.5 s**, with
+the container assembly and its jar checks accounting for the difference.
 [BazelClasspathContainerInitializer](server/src/io/github/sorteam/bazel/jdtls/BazelClasspathContainerInitializer.java)
-therefore hands JDT an *empty* container and returns, and the resolve job publishes the real one a
-moment later - the same path a cold import already took, and the same single publish per project
-either way. Empty is a placeholder and not a failure: JDT treats a missing container as a broken
-classpath, an empty one as one with no libraries yet. The time spent handing out placeholders is
-logged in batches, so the next slow start says whether the time went here or somewhere else.
+therefore assembles nothing: JDT persists every container it was given at the end of a session and
+restores the entries before the initializers run, and handing that same object straight back is the
+one case `setClasspathContainer` short-circuits completely - no classpath delta, no re-resolution,
+nothing queued for the indexer. That is deliberately not an empty placeholder. A change from "N
+jars" to anything else is a classpath delta, and on a delta JDT drops the index of every jar that
+left the classpath and is not shared with another project, then rebuilds it when the real container
+arrives a moment later - a flip paid on every start. The placeholder is used only where there is no
+previous session to restore from, which is also where JDT had no index to drop. The resolve job
+publishes the real container afterwards - and only for a project JDT could *not* restore, since for
+the restored ones the import that follows enqueues the whole workspace anyway, and doing both meant
+two passes over every container on every start to conclude that nothing had changed. It skips the
+publish when what JDT holds already matches. How the seeding went - how many restored, how many placeholders, how long -
+is logged in batches, so the next slow start says whether the time went here or somewhere else.
 
 **Whatever holds the platform, the process still has to be able to die.** The invariant below
 describes a state in which nothing in the language server can run - and the exit path is part of
@@ -477,9 +515,9 @@ platform API in the loop, `halt` rather than `exit` because a shutdown hook is a
 block. A watchdog that can be blocked is not a watchdog. It waits well past the language server's
 own ~40 s detection window before acting, because interrupting a legitimate workspace save is how
 metadata gets truncated - the aim is that a process nobody can use is gone within two minutes rather
-than gone quickly. Verified by test rather than by inspection: a JVM is started under a shell, the
-shell is killed, and the JVM is required to still be there through the grace period and then to end
-itself.
+than gone quickly. Verified by test rather than by inspection: a JVM is
+started under a shell, the shell is killed, and the JVM is required to still be there through the
+grace period and then to end itself.
 
 **A language server that outlives the editor is not this plugin's shutdown, it is a held job lock.**
 Worth writing down because every symptom of it points elsewhere - java processes still holding

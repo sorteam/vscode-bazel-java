@@ -1,5 +1,43 @@
 # Changelog
 
+## 0.8.4
+
+- **Opening the editor no longer runs a bazel analysis and a build of the whole repository.** This is
+  the cause of the failure that kept coming back, and it was not where it looked. The plugin decided
+  which labels still needed querying by checking an in-memory map - which is empty in a new process -
+  so the classpaths its previous session had already resolved and written to disk were never seen,
+  and every start re-ran an aquery over every label. The runtime-classpath pass is driven by the same
+  list, so it re-ran a cquery too. And `buildOnImport` meant "once per session", where a session is
+  every window: a build of every discovered target, every time.
+
+  Measured on a 116-project workspace whose cached import was valid and whose containers JDT had
+  already restored: 233 labels analysed, 232 more for the runtime pass, 233 targets built - and 0
+  containers published, because nothing had changed. Warm that is about four seconds of bazel. Cold -
+  the first start after a reboot, after a branch switch, after anything that dropped bazel's analysis
+  cache - it is a full analysis and build of the repository, minutes of every core and gigabytes of
+  memory, spent while the editor is still starting its other language servers. That is the machine
+  the next window has to start on, and the language client gives a start 30 s before it abandons the
+  server and launches a second one on the same workspace directory - which is where
+  `command 'sts.java.addClasspathListener' already exists`, the retry loop behind it (15 attempts a
+  second, 2054 failures in three and a half minutes) and the 9.3 GB language server all come from.
+
+  The on-disk cache is now consulted before bazel is; the background build is started only for the
+  labels whose classpath entries are genuinely missing from disk, and only those labels are built;
+  the repository-wide build-file walk happens only when its result is going to be used; and a project
+  whose container JDT restored is no longer resolved twice on every start. A start where nothing
+  changed now runs **no bazel at all** - verified by pointing the bazel binary at a wrapper that logs
+  every invocation and counting zero across two consecutive starts.
+
+- **The container initializer hands JDT back the container it already has.** JDT calls it once per
+  project while restoring the java model, inside the window the language client is timing. JDT
+  persists every container it was given and restores the entries beforehand; handing that same object
+  straight back is the one case `setClasspathContainer` short-circuits completely - no classpath
+  delta, no re-resolution, nothing queued for the indexer. An empty placeholder, by contrast, is a
+  change from "N jars" to none, and on that delta JDT drops the index of every jar that left the
+  classpath and is not shared, then rebuilds it when the real container arrives a moment later - a
+  flip paid on every start. The placeholder is now used only where there is no previous session to
+  restore from. Measured: 117 containers seeded in 5 ms.
+
 ## 0.8.3
 
 - **The second launch of a workspace no longer takes longer than the language client will wait.**

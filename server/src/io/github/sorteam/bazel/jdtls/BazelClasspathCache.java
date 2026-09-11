@@ -131,12 +131,64 @@ public final class BazelClasspathCache {
 
     private Map<String, List<String>> warmAll(List<String> labels, IProgressMonitor monitor,
             boolean force) throws CoreException {
+        /*
+            The disk cache counts as cached, and that sentence is the whole point of this block.
+
+            This map is empty in a fresh process, so a check against it alone answers "not cached"
+            for every label of a workspace whose classpaths were resolved and written to disk by the
+            previous session. The effect was that every single start of the editor re-ran aquery over
+            the entire repository - and, since the runtime pass below is driven by the same list, a
+            cquery over it as well. Measured on a 116-project workspace with a cache that was valid
+            and 0 containers to publish: 233 labels analysed, 232 more for the runtime classpath,
+            ~4 s of bazel with a warm server. With a cold one - the first start after a reboot, after
+            a branch switch, after any build that dropped the analysis cache - that is a full
+            analysis of the repository, minutes of every core and gigabytes of memory, landing at the
+            exact moment the editor is starting everything else it has to start.
+
+            Nothing needed it. The jars were on disk, the containers JDT restored already pointed at
+            them, and the answer bazel was being asked for was the answer already in the store.
+
+            One consequence worth stating: a label the store holds as *empty* now counts as answered
+            too, so a classpath that came back empty because bazel could not analyse that target is
+            no longer retried on the next start. That is the same contract the empty entries were
+            written under - they exist so a label with no Javac action is not queried forever - and
+            the ways out of it are unchanged: a BUILD file change forces a refresh, and so does
+            'JBazel: Refresh Classpath'.
+         */
         List<String> pending = new ArrayList<>();
-        synchronized (this) {
-            labels.stream().filter(label -> force || !jarsByLabel.containsKey(label))
-                    .forEach(pending::add);
+        int alreadyKnown = 0;
+        for (String label : labels) {
+            if (!force) {
+                synchronized (this) {
+                    if (jarsByLabel.containsKey(label)) {
+                        alreadyKnown++;
+                        continue;
+                    }
+                }
+                /*
+                    Read outside the monitor: the store takes its own lock and loads from disk on
+                    first use, and holding this one across that is how two locks become one deadlock.
+                 */
+                List<String> stored = session.getStore().peekJars(label);
+                if (stored != null) {
+                    synchronized (this) {
+                        jarsByLabel.putIfAbsent(label, stored);
+                    }
+                    alreadyKnown++;
+                    continue;
+                }
+            }
+            pending.add(label);
         }
         if (pending.isEmpty()) {
+            /*
+                Logged, and logged once, because "the plugin ran no bazel on this start" is the fact
+                every future investigation of a slow start needs and the only trace of it would
+                otherwise be the absence of a line.
+             */
+            BazelLog.warnOnce("classpath-from-cache:" + session.getWorkspace().getRoot().getName(),
+                    String.format("JBazel: %d label(s) answered from the cached import; no bazel"
+                            + " query on this start", alreadyKnown));
             return Map.of();
         }
 

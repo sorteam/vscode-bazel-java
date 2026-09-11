@@ -23,7 +23,16 @@ import org.eclipse.core.runtime.jobs.Job;
     the targets once materialises them.
 
     Explicitly a command rather than something the import does on its own: a repository-wide build
-    is the developer's decision, not the indexer's.
+    is the developer's decision, not the indexer's. What the import may start by itself is narrower
+    and conditional - only the labels whose classpath entries are genuinely absent from disk, and
+    only when the buildOnImport setting asks for it.
+
+    The distinction is the whole reason this is written down. Started unconditionally, once per
+    session, it meant a build of every discovered target every time the editor was opened - on a
+    workspace whose jars were all present and whose containers JDT had already restored. Warm that
+    costs a second. Cold - the first start after a reboot, or after anything that dropped bazel's
+    analysis cache - it is a full analysis and build of the repository, minutes of every core,
+    running at the moment the editor is starting the rest of its language servers.
  */
 public final class BuildClasspathJob extends Job {
 
@@ -63,11 +72,30 @@ public final class BuildClasspathJob extends Job {
         so on an up-to-date repository this costs a few seconds and changes nothing; on a stale one
         it is the difference between the IDE showing last week's API and the current one.
      */
-    public static void startIfConfigured(BazelSession session) {
-        if (!session.getSettings().isBuildOnImport() || !session.markClasspathBuildStarted()) {
+    /*
+        Started only when the classpath actually points at jars that are not there.
+
+        The setting used to mean "build the repository once per session", and a session is every
+        time the editor is opened - so a workspace whose jars were all present, whose cached import
+        was valid and whose containers JDT had already restored still ran a build of every discovered
+        target on every start. Warm that is a second; cold it is a full build competing with the
+        editor's own startup, and the machine it is competing on is the one deciding whether the
+        language client's 30 s start budget is met.
+
+        Missing jars are the condition the build exists for - aquery reports what a Javac action
+        would consume, so on a fresh clone the entries name jars nothing has produced yet - and they
+        are counted while publishing, which is the only place that knows. Nothing missing, nothing to
+        build.
+     */
+    public static void startIfConfigured(BazelSession session, Collection<String> labels) {
+        if (labels.isEmpty() || !session.getSettings().isBuildOnImport()
+                || !session.markClasspathBuildStarted()) {
             return;
         }
-        startFor(session);
+        BazelLog.info(String.format(
+                "JBazel: %d label(s) have classpath jars that are not on disk; building those in"
+                        + " the background", labels.size()));
+        new BuildClasspathJob(session, new ArrayList<>(new LinkedHashSet<>(labels))).schedule();
     }
 
     private static boolean startFor(BazelSession session) {

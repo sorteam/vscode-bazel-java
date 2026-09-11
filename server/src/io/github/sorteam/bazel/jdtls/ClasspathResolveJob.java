@@ -40,6 +40,13 @@ public final class ClasspathResolveJob extends Job {
     private static final Map<String, ClasspathResolveJob> JOBS = new ConcurrentHashMap<>();
 
     private final BazelSession session;
+
+    /*
+        The labels of this batch whose containers point at jars that are not on disk. Only ever
+        touched by the run that filled it, so a plain field is enough. It is what decides whether
+        anything has to be built, and what - see BuildClasspathJob.
+     */
+    private final Set<String> labelsWithMissingJars = new LinkedHashSet<>();
     private final Map<String, Request> pending = new LinkedHashMap<>();
     private final Set<String> priority = new LinkedHashSet<>();
 
@@ -142,13 +149,21 @@ public final class ClasspathResolveJob extends Job {
                 Captured before any bazel work: this digest describes the tree the resolved
                 classpaths belong to. Stamping a digest taken after the fact would mark data from
                 the old tree as current when a branch switch lands mid-resolve.
+
+                Only computed when it is going to be used. It is a walk of the whole repository
+                looking for build files, and on the common start - a cache that already carries a
+                stamp - the result was computed and thrown away. Deciding once, here, keeps the
+                ordering the comment above requires.
              */
-            String buildFilesDigest = Digests.buildFilesDigest(
-                    session.getWorkspace().getRoot().toPath());
+            boolean needsStamp = !session.getStore().hasStamp();
+            String buildFilesDigest = needsStamp
+                    ? Digests.buildFilesDigest(session.getWorkspace().getRoot().toPath())
+                    : null;
             File executionRoot = executionRoot(monitor);
 
             int published = 0;
             int unchanged = 0;
+            labelsWithMissingJars.clear();
             for (Request request : urgent) {
                 published += resolveOne(request, executionRoot, monitor) ? 1 : 0;
             }
@@ -177,7 +192,7 @@ public final class ClasspathResolveJob extends Job {
                 describes. Stamping unconditionally here used to be able to mask a BUILD edit that
                 happened between a cached discovery and this resolve.
              */
-            if (!session.getStore().hasStamp()) {
+            if (needsStamp) {
                 session.getStore().stamp(session.getSettings(), buildFilesDigest);
             }
             session.getStore().save();
@@ -190,7 +205,7 @@ public final class ClasspathResolveJob extends Job {
             List<IJavaProject> resolved = new ArrayList<>();
             batch.forEach(request -> resolved.add(request.javaProject()));
             ExternalArchives.refresh(resolved);
-            BuildClasspathJob.startIfConfigured(session);
+            BuildClasspathJob.startIfConfigured(session, labelsWithMissingJars);
         } catch (CoreException e) {
             if (BazelWorkspace.isServerBusy(e)) {
                 // A terminal build holds the server; short fixed retry, no failure escalation.
@@ -314,6 +329,9 @@ public final class ClasspathResolveJob extends Job {
             if (lastPublished == null || lastPublished != stamp) {
                 session.setPublishedContainerStamp(projectName, stamp);
             }
+            if (container.getMissingCount() > 0) {
+                labelsWithMissingJars.addAll(request.allLabels());
+            }
             session.getReport().countContainerUnchanged();
             return false;
         }
@@ -328,6 +346,7 @@ public final class ClasspathResolveJob extends Job {
             session.getReport().countJars(container.getResolvedCount(),
                     container.getMissingCount(), container.getSourceAttachmentCount());
             if (container.getMissingCount() > 0) {
+                labelsWithMissingJars.addAll(request.allLabels());
                 BazelLog.warnOnce("missing-jars:" + session.getWorkspace().getRoot(), String.format(
                         "JBazel: %d classpath jars do not exist on disk yet (for example in %s)."
                                 + " Run 'JBazel: Build Classpath' to produce them.",

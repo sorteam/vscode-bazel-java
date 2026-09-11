@@ -3,6 +3,7 @@ package io.github.sorteam.bazel.jdtls;
 import java.util.Optional;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 
 /*
     Ends the language server process when the editor that started it is gone and the server has not
@@ -44,8 +45,11 @@ final class ExitWatchdog {
     private static final long DEFAULT_GRACE_SECONDS = 90;
     private static final long MIN_GRACE_SECONDS = 5;
     private static final long POLL_MILLIS = 1000;
+    private static final long UNSET = Long.MIN_VALUE;
 
     private static final AtomicBoolean ARMED = new AtomicBoolean();
+    /* Only ever lowered: whichever caller wants the process gone sooner wins. */
+    private static final AtomicLong GRACE_NANOS = new AtomicLong(UNSET);
 
     private ExitWatchdog() {
     }
@@ -56,6 +60,12 @@ final class ExitWatchdog {
         in every tool that happens to load one of these classes.
      */
     static void arm() {
+        armWith(graceNanos());
+    }
+
+    private static void armWith(long grace) {
+        GRACE_NANOS.accumulateAndGet(grace,
+                (current, proposed) -> current == UNSET ? proposed : Math.min(current, proposed));
         if (!ARMED.compareAndSet(false, true)) {
             return;
         }
@@ -88,7 +98,6 @@ final class ExitWatchdog {
     }
 
     private static void watch(ProcessHandle editor) {
-        long grace = graceNanos();
         long goneSince = 0;
         while (true) {
             try {
@@ -103,8 +112,9 @@ final class ExitWatchdog {
             }
             if (goneSince == 0) {
                 goneSince = System.nanoTime();
-                continue;
             }
+            // Read on every turn: a server can stand down after the watchdog was armed.
+            long grace = GRACE_NANOS.get();
             if (System.nanoTime() - goneSince < grace) {
                 continue;
             }
@@ -115,9 +125,10 @@ final class ExitWatchdog {
                 also fine - nobody is reading it either way.
              */
             System.err.println("JBazel: the editor that started this language server (pid "
-                    + editor.pid() + ") exited " + TimeUnit.NANOSECONDS.toSeconds(grace)
-                    + " s ago and the server has not; ending the process so it stops holding the"
-                    + " lock on its workspace directory");
+                    + editor.pid() + ") has exited" + (grace > 0
+                            ? " " + TimeUnit.NANOSECONDS.toSeconds(grace) + " s ago and the server has not"
+                            : " and this server had already stood down")
+                    + "; ending the process so it stops holding its workspace directory");
             /*
                 Non-blocking by construction - see BazelSession.shutdownAll - and done here because
                 halt() runs no shutdown hooks. This is the only thing in that hook worth keeping.
