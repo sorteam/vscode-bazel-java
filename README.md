@@ -249,6 +249,66 @@ are all still bazel workspaces. The single case that does hand the folder on is 
 succeeding and finding no java at all. For the same reason the backoff window no longer declines to
 apply - it backs off the work, not the claim.
 
+**The resource model is not the file system, and nothing refreshes it for us.** The language server
+answers questions about the working copy from a tree it holds in memory and persists on exit; that
+tree is updated only when something calls `refreshLocal`. Auto-refresh - the workspace flag that
+would install a file-system monitor - is never enabled by jdt.ls, which instead refreshes on a
+watched file event from the client, on a document being opened, and from each importer for the
+projects it imported. The first two cannot see a branch switch, pull or rebase performed while the
+editor was closed: no events are produced and nothing is open, and on the next start the tree is
+restored from the previous session's snapshot. A file that arrived in between then does not exist as
+far as the java model is concerned, so every reference to a type declared in it is an error - in
+every file except the ones someone opens, which is why opening a file appears to fix it. The third
+moment is the one the importers shipped with the language server use, and the one this plugin was
+missing.
+[WorkingTree](server/src/io/github/sorteam/bazel/jdtls/WorkingTree.java) closes it, in the background
+after the import rather than inside it, since the work is a timestamp comparison over the source
+folders and not a read of their contents.
+
+**A jar that exists is not a jar that is current, and only the platform knows who changed.** The
+classpath cannot tell the difference: an output built from an earlier state of the sources keeps its
+path and its name, so the container is byte-identical, the stamp matches and there is nothing to
+republish. What differs is the content, and it shows wherever the repository generates code into
+those outputs - a type added to an interface description is not in the archive the editor reads, and
+every reference to it is an unresolved type that no re-resolve can clear. Only building produces it.
+
+The hard part is not *that* a build is needed but *when*, and the answer is not one to invent. The
+platform already computes it: a builder registered on a project is handed a resource delta rooted at
+that project, covering every change since it last ran there. A commit that touches nothing inside a
+project yields no delta for it and no build.
+[BazelClasspathBuilder](server/src/io/github/sorteam/bazel/jdtls/BazelClasspathBuilder.java) uses
+exactly that, and does no work itself: `build` runs inside the platform's build cycle holding the
+workspace build lock, where a bazel invocation is seconds at best and minutes on a cold analysis
+cache, so the delta only decides, and
+[BuildClasspathJob](server/src/io/github/sorteam/bazel/jdtls/BuildClasspathJob.java) coalesces the
+labels from however many projects were touched into one invocation. The same shape as the other IDE
+integrations for this build system: per-target, driven by what changed, "build as little as possible"
+rather than a sync of everything.
+
+Two triggers were considered and rejected, and are worth naming because both look reasonable. "The
+editor started" rebuilds the repository for nothing, every time, which is the invariant above. "The
+working copy moved to another revision" rebuilds the back end because someone changed the front end -
+a monorepo has one revision and many independent things in it, so the revision says nothing about
+which of them moved. The one remaining case neither the delta nor anything else can see is a change
+made outside the workspace entirely; that stays an explicit `JBazel: Build Classpath`.
+
+**An importer that throws does not fail its own import, it fails the whole initialization.** jdt.ls
+catches nothing per folder: one importer raising a `CoreException` ends `ProjectsManager.importProjects`
+with `Failed to import projects` and the initialization job with `Initialization failed`, so no folder
+is imported, nothing is retried, and the workspace stays empty until the window is reloaded. That is
+the wrong answer to the commonest reason discovery cannot run - another bazel command already holds
+the server lock, which on a developer's machine is a build in a terminal. This plugin's query is the
+one that steps aside there, deliberately: it passes `--noblock_for_lock` so that queueing behind a
+build the developer is waiting on cannot make the terminal wait for the indexer.
+[BazelProjectImporter](server/src/io/github/sorteam/bazel/jdtls/BazelProjectImporter.java) therefore
+records the condition, schedules the retry past the gate's window and returns having provisioned
+nothing, rather than throwing. It also does not write its settle marker, so the next initialization is
+free to try again immediately, and it keeps the claim, since declining it hands the repository to the
+fallback importer - a worse state than projects that are a few seconds late.
+[DiscoveryRefreshJob](server/src/io/github/sorteam/bazel/jdtls/DiscoveryRefreshJob.java) owns the
+retry, and keeps owed work alive across failures where a routine refresh would drop it: a refresh
+that fails still has the cache it was improving, while an import that failed has nothing behind it.
+
 **The workspace can be initialized many times, so an import has to be idempotent and cheap.** A
 language client that ends up in the retry loop described above asks for the workspace to be
 initialized about twice a second for as long as the window is open, and each ask reaches the importer.

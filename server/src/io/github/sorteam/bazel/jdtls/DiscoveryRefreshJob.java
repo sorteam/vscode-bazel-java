@@ -55,13 +55,31 @@ public final class DiscoveryRefreshJob extends Job {
         signal is not to second-guess it.
      */
     public static void scheduleFor(BazelSession session, boolean force) {
-        DiscoveryRefreshJob job = JOBS.computeIfAbsent(
-                session.getWorkspace().getRoot().getAbsolutePath(),
-                ignored -> new DiscoveryRefreshJob(session));
+        DiscoveryRefreshJob job = jobFor(session);
         if (force) {
             job.forced = true;
         }
         job.schedule(force ? 500 : 2000);
+    }
+
+    /*
+        The retry owed by an import that could not run at all.
+
+        Scheduled past the gate's current window rather than at the usual delay, because a job that
+        wakes inside the window finds the gate closed and - unless it is a busy wait - returns
+        without rescheduling, which would drop the work it was created to do. Forced for the same
+        reason the caller failed: the cache whose stamp this job would otherwise check is the cache
+        that import never got to write.
+     */
+    public static void retryOwedImport(BazelSession session) {
+        DiscoveryRefreshJob job = jobFor(session);
+        job.forced = true;
+        job.schedule(session.getDiscoveryGate().remainingSeconds() * 1000 + 500);
+    }
+
+    private static DiscoveryRefreshJob jobFor(BazelSession session) {
+        return JOBS.computeIfAbsent(session.getWorkspace().getRoot().getAbsolutePath(),
+                ignored -> new DiscoveryRefreshJob(session));
     }
 
     @Override
@@ -130,6 +148,8 @@ public final class DiscoveryRefreshJob extends Job {
             targets.forEach(target -> labels.add(target.label()));
             session.getCache().refreshAll(labels, monitor);
             ClasspathResolveJob.enqueueAll(session, projects);
+            // The tree moved enough to re-provision, so it certainly moved enough to re-read.
+            WorkingTree.refresh(session, projects);
 
             /*
                 The stamp is the digest taken before discovery. If the tree moved while the refresh
@@ -157,6 +177,19 @@ public final class DiscoveryRefreshJob extends Job {
                 schedule(session.getDiscoveryGate().remainingSeconds() * 1000 + 500);
             } else {
                 session.getDiscoveryGate().recordFailure(e.getMessage());
+                /*
+                    A routine refresh that fails waits for the next BUILD edit - the cache it failed
+                    to improve is still the one in use, and retrying a broken repository on a timer
+                    only fills the log. Work that was *owed*, though, has no cache behind it: it is
+                    there because an import provisioned nothing at all, so dropping it after one
+                    attempt would leave the workspace empty. It is kept, past the gate's own window,
+                    which grows with each consecutive failure and is what keeps this from becoming a
+                    retry loop.
+                 */
+                if (force) {
+                    forced = true;
+                    schedule(session.getDiscoveryGate().remainingSeconds() * 1000 + 500);
+                }
             }
         }
         return Status.OK_STATUS;

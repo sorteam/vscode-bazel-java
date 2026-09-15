@@ -13,6 +13,7 @@ import org.eclipse.core.resources.FileInfoMatcherDescription;
 import org.eclipse.core.resources.IContainer;
 import org.eclipse.core.resources.IFile;
 import org.eclipse.core.resources.IFolder;
+import org.eclipse.core.resources.ICommand;
 import org.eclipse.core.resources.IProject;
 import org.eclipse.core.resources.IProjectDescription;
 import org.eclipse.core.resources.IResource;
@@ -235,6 +236,7 @@ public class ProjectProvisioner {
             progress.worked(1);
         }
         ensureJavaNature(project, progress.split(1));
+        ensureClasspathBuilder(project, progress.split(1));
     }
 
     /*
@@ -274,6 +276,29 @@ public class ProjectProvisioner {
         String[] extended = Arrays.copyOf(natures, natures.length + 1);
         extended[natures.length] = JavaCore.NATURE_ID;
         description.setNatureIds(extended);
+        project.setDescription(description, monitor);
+    }
+
+    /*
+        Registers the builder that lets the platform tell this plugin when a project's own files
+        change. Added after the java builder rather than before it, so a change is compiled first and
+        the bazel outputs are refreshed behind that - the editor's own answer is the one the
+        developer is waiting for.
+     */
+    private static void ensureClasspathBuilder(IProject project, IProgressMonitor monitor)
+            throws CoreException {
+        IProjectDescription description = project.getDescription();
+        ICommand[] commands = description.getBuildSpec();
+        for (ICommand command : commands) {
+            if (BazelClasspathBuilder.BUILDER_ID.equals(command.getBuilderName())) {
+                return;
+            }
+        }
+        ICommand build = description.newCommand();
+        build.setBuilderName(BazelClasspathBuilder.BUILDER_ID);
+        ICommand[] extended = Arrays.copyOf(commands, commands.length + 1);
+        extended[commands.length] = build;
+        description.setBuildSpec(extended);
         project.setDescription(description, monitor);
     }
 

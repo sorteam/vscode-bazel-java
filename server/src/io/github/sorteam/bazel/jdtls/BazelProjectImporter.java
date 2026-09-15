@@ -133,6 +133,29 @@ public class BazelProjectImporter extends AbstractProjectImporter {
             targets = discover(progress.split(20));
             session.getDiscoveryGate().recordSuccess();
         } catch (CoreException e) {
+            /*
+                Not rethrown, and that is the whole point of this block.
+
+                jdt.ls has exactly one reaction to an importer that throws: it abandons the import of
+                every folder with "Failed to import projects", and the initialization job that called
+                it ends with "Initialization failed". Nothing is retried, nothing is provisioned, and
+                the workspace stays empty until someone reloads the window.
+
+                That is a ruinous answer to the commonest reason discovery cannot run: another bazel
+                command already holds the server. A developer running a build in a terminal is not a
+                broken workspace, and with --noblock_for_lock this plugin's query is the one that
+                steps aside - deliberately, because queueing behind a build the developer is waiting
+                on would make the terminal wait for the indexer. The condition is transient and there
+                is already a mechanism for it: the gate holds a short window and the refresh job
+                retries past it.
+
+                So the failure is recorded, the retry is scheduled, and the import returns having
+                provisioned nothing. Note what is *not* done: the settle marker below is not written,
+                so the next initialization is free to try again immediately, and the folder is still
+                reported resolved - declining the claim would hand the whole repository to jdt.ls's
+                fallback importer, which is a far worse state than a workspace whose projects are a
+                few seconds late.
+             */
             if (BazelWorkspace.isServerBusy(e)) {
                 // A terminal command holds the server; a short fixed window is enough, escalating
                 // the exponential backoff for it would punish a normal situation.
@@ -140,7 +163,14 @@ public class BazelProjectImporter extends AbstractProjectImporter {
             } else {
                 session.getDiscoveryGate().recordFailure(e.getMessage());
             }
-            throw e;
+            DiscoveryRefreshJob.retryOwedImport(session);
+            BazelLog.warnOnce("import-deferred:" + rootFolder, String.format(
+                    "JBazel: the import could not run (%s); retrying in %d s. Projects already"
+                            + " imported are kept, and no new ones are provisioned until it"
+                            + " succeeds.",
+                    session.getDiscoveryGate().describe(),
+                    session.getDiscoveryGate().remainingSeconds()));
+            return;
         }
         long discoveryMillis = System.currentTimeMillis() - discoveryStarted;
         report.setDiscoveredTargets(targets.size());
@@ -176,6 +206,12 @@ public class BazelProjectImporter extends AbstractProjectImporter {
             Classpath resolution is deliberately not awaited. This is the whole point of the change:
             "Workspace initialized" no longer waits on bazel, and the containers fill in behind it.
          */
+        /*
+            The resource model has to be told what is on disk at all - see WorkingTree - or the
+            compiler never sees a file that arrived while the editor was closed, and neither does
+            anything that reacts to files changing.
+         */
+        WorkingTree.refresh(session, projects);
         ClasspathResolveJob.enqueueAll(session, projects);
         session.getStore().save();
 

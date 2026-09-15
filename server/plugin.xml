@@ -2,6 +2,15 @@
 <?eclipse version="3.4"?>
 <plugin>
    <extension
+         id="classpathBuilder"
+         name="JBazel Classpath Builder"
+         point="org.eclipse.core.resources.builders">
+      <builder hasNature="true">
+         <run class="io.github.sorteam.bazel.jdtls.BazelClasspathBuilder"/>
+      </builder>
+   </extension>
+
+   <extension
          id="importers"
          point="org.eclipse.jdt.ls.core.importers">
       <importer

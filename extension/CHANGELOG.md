@@ -1,5 +1,56 @@
 # Changelog
 
+## 0.8.5
+
+- **Code the repository generates is rebuilt when the project it belongs to changes - and only
+  then.** A regression from the previous release, and the worse half was that nothing looked wrong.
+  The background build had been narrowed to labels whose classpath jars are absent from disk, on the
+  reasoning that a jar that exists is current. It is not: an archive built from an earlier state of
+  the sources keeps its path and its name, so the container is identical and there is nothing to
+  republish, while its contents are weeks old. Where that shows is in generated code - a type
+  declared in an interface description that arrived with a branch is not in the jar the editor
+  reads, and every reference to it is an unresolved type.
+
+  The trigger is now the platform's own: a builder registered on each project is handed a resource
+  delta rooted at that project, and a change inside it queues a build of that project's targets.
+  Nothing else does. A commit touching only files outside a project produces no delta for it and no
+  build, a restart on an unchanged workspace still runs no bazel at all, and the builds from however
+  many projects were touched at once are coalesced into a single invocation. The build never runs
+  inside the platform's build cycle, which holds a workspace-wide lock that a bazel invocation has no
+  business holding for minutes.
+
+- **Files that changed while the editor was closed are visible to the compiler again.** The language
+  server does not read the file system to answer questions about it: it answers from a resource tree
+  it keeps in memory and writes out on exit, and that tree is only updated when something calls for a
+  refresh. Auto-refresh is left off, and the language server refreshes at three moments - a watched
+  file event from the client, a document being opened, and an importer refreshing the projects it
+  just imported. The first two cannot cover a branch switch performed while the editor was closed,
+  since no events are produced and nothing is open; the third is what the importers shipped with the
+  language server do and this one did not. A file that arrived in the meantime therefore did not
+  exist as far as the compiler was concerned - in every file except the ones someone happened to
+  open, which is why clicking a file appeared to fix it. The import now synchronises the projects it
+  provisioned with the working copy, in the background, after the import rather than inside it.
+  Measured on a 116-project workspace: one pass over the source folders, comparing timestamps rather
+  than reading contents.
+
+- **A bazel server that is busy no longer fails the whole workspace initialization.** Another command
+  holding the lock - a build running in a terminal - made discovery raise, and jdt.ls has exactly one
+  reaction to an importer that raises: it abandons the import of every folder with
+  `Failed to import projects` and ends its initialization job with `Initialization failed`. Nothing
+  was retried and nothing was provisioned, so the workspace stayed empty until the window was
+  reloaded, over a condition that clears itself in seconds.
+
+  The import now records the busy server, schedules the retry past its own backoff window and returns
+  having provisioned nothing, keeping whatever was already imported. It does not write its settle
+  marker either, so the next initialization is free to try again at once, and it keeps claiming the
+  folder - declining would hand the repository to the language server's fallback importer, which is a
+  worse state than projects that are a few seconds late. Work owed by an import that could not run is
+  also kept across a failed retry, where a routine background refresh would drop it: a refresh that
+  fails still has the cache it was improving, an import that failed has nothing behind it. Verified
+  against a language server driven with a bazel that always reports itself busy: the workspace
+  initializes, the log says why and when it will retry, and the retries land on the backoff window
+  instead of on a loop.
+
 ## 0.8.4
 
 - **Opening the editor no longer runs a bazel analysis and a build of the whole repository.** This is

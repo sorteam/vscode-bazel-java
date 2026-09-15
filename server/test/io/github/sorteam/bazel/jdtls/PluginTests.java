@@ -53,6 +53,7 @@ public final class PluginTests {
         failureGateBusyWindowDoesNotEscalate();
         watchdogKillsASilentProcess();
         busyServerIsClassifiedAsBusyNotAsFailure();
+        aBusyServerDefersTheImportInsteadOfFailingIt();
         theSymlinkFlagIsPassedOnlyForADedicatedOutputBase();
         convenienceSymlinksInTheRootAreReported();
         exclusionPatternsFenceOffTheOutputTree();
@@ -1355,6 +1356,36 @@ public final class PluginTests {
     }
 
     /* ------------------------------------------------------------------ util */
+
+    /*
+        A busy bazel server is another command holding the lock, which on a developer's machine is a
+        build in a terminal. What the import does with it decides whether the workspace survives:
+        rethrowing reaches jdt.ls, which abandons the import of every folder and fails its
+        initialization job, so the numbers the retry is scheduled from have to be real.
+     */
+    private static void aBusyServerDefersTheImportInsteadOfFailingIt() {
+        FailureGate gate = new FailureGate("discovery(test)", 300);
+        check("a fresh gate lets work through", !gate.shouldSkip(), gate.describe());
+
+        gate.recordBusy("Another command (pid=12345) is running. Exiting immediately.");
+        check("a busy server closes the gate", gate.shouldSkip(), gate.describe());
+        check("and is remembered as waiting, not as broken", gate.isBusyWaiting(), gate.describe());
+        check("so the retry has a window to be scheduled past", gate.remainingSeconds() > 0,
+                String.valueOf(gate.remainingSeconds()));
+        check("a busy server is not counted as a failure", gate.getConsecutiveFailures() == 0,
+                String.valueOf(gate.getConsecutiveFailures()));
+        check("and never asks for a human", !gate.needsAFix(), gate.describe());
+
+        gate.recordSuccess();
+        check("the window clears once a command gets through", !gate.shouldSkip(), gate.describe());
+        check("and nothing is left waiting", !gate.isBusyWaiting(), gate.describe());
+
+        gate.recordFailure("no such package '//nope'");
+        check("a real failure still closes the gate", gate.shouldSkip(), gate.describe());
+        check("and is not mistaken for a busy server", !gate.isBusyWaiting(), gate.describe());
+        check("and the owed retry still has a window", gate.remainingSeconds() > 0,
+                String.valueOf(gate.remainingSeconds()));
+    }
 
     private static void check(String name, boolean condition, String actual) {
         checks++;

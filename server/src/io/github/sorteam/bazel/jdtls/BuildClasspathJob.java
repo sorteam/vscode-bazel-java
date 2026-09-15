@@ -5,7 +5,9 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 
 import org.eclipse.core.runtime.CoreException;
@@ -42,17 +44,45 @@ public final class BuildClasspathJob extends Job {
     private static final int MAX_BUSY_DEFERRALS = 20;
     private static final long BUSY_DEFER_MILLIS = 30_000;
 
+    /*
+        Coalescing window. A checkout produces a resource delta per affected project, so the builder
+        is called a hundred times in a row for what is one change to the working copy; without a
+        window that is a hundred bazel builds queued behind each other.
+     */
+    private static final long COALESCE_MILLIS = 1500;
+
+    private static final Map<String, BuildClasspathJob> JOBS = new ConcurrentHashMap<>();
+
     private final BazelSession session;
-    private final List<String> labels;
+    private final Set<String> pending = new LinkedHashSet<>();
 
     private int busyDeferrals;
 
-    private BuildClasspathJob(BazelSession session, List<String> labels) {
+    private BuildClasspathJob(BazelSession session) {
         super("Building bazel classpath for " + session.getWorkspace().getRoot().getName());
         this.session = session;
-        this.labels = labels;
         setPriority(Job.LONG);
-        setUser(true);
+        setSystem(false);
+    }
+
+    private static BuildClasspathJob jobFor(BazelSession session) {
+        return JOBS.computeIfAbsent(session.getWorkspace().getRoot().getAbsolutePath(),
+                ignored -> new BuildClasspathJob(session));
+    }
+
+    /*
+        The one way in. Labels accumulate and the build runs once for all of them, which is what
+        makes a caller that reports one project at a time - the project builder - safe.
+     */
+    static void enqueue(BazelSession session, Collection<String> labels) {
+        if (labels.isEmpty()) {
+            return;
+        }
+        BuildClasspathJob job = jobFor(session);
+        synchronized (job) {
+            job.pending.addAll(labels);
+        }
+        job.schedule(COALESCE_MILLIS);
     }
 
     public static String start(Collection<BazelSession> sessions) {
@@ -88,14 +118,21 @@ public final class BuildClasspathJob extends Job {
         build.
      */
     public static void startIfConfigured(BazelSession session, Collection<String> labels) {
+        /*
+            Still once per session, unlike the delta-driven path. This one fires from the resolve,
+            which runs again whenever a classpath is republished, and a target that cannot build
+            leaves its jars missing - so without a bound a repository with one broken target would
+            rebuild on a loop. A change the developer makes is a different matter: that has a person
+            behind it and is allowed to ask again.
+         */
         if (labels.isEmpty() || !session.getSettings().isBuildOnImport()
                 || !session.markClasspathBuildStarted()) {
             return;
         }
-        BazelLog.info(String.format(
-                "JBazel: %d label(s) have classpath jars that are not on disk; building those in"
-                        + " the background", labels.size()));
-        new BuildClasspathJob(session, new ArrayList<>(new LinkedHashSet<>(labels))).schedule();
+        BazelLog.warnOnce("missing-jar-build:" + session.getWorkspace().getRoot().getName(),
+                String.format("JBazel: %d label(s) have classpath jars that are not on disk;"
+                        + " building those in the background", labels.size()));
+        enqueue(session, labels);
     }
 
     private static boolean startFor(BazelSession session) {
@@ -105,7 +142,7 @@ public final class BuildClasspathJob extends Job {
         }
         Set<String> labels = new LinkedHashSet<>();
         discovered.forEach(target -> labels.add(target.label()));
-        new BuildClasspathJob(session, new ArrayList<>(labels)).schedule();
+        enqueue(session, labels);
         return true;
     }
 
@@ -119,6 +156,14 @@ public final class BuildClasspathJob extends Job {
          */
         if (session.getWorkspace().wasBusyRecently() && ++busyDeferrals <= MAX_BUSY_DEFERRALS) {
             schedule(BUSY_DEFER_MILLIS);
+            return Status.OK_STATUS;
+        }
+        List<String> labels;
+        synchronized (this) {
+            labels = new ArrayList<>(pending);
+            pending.clear();
+        }
+        if (labels.isEmpty()) {
             return Status.OK_STATUS;
         }
         long started = System.currentTimeMillis();
