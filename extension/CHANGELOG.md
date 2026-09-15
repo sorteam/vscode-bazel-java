@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.8.6
+
+- **"N jars not built" says how many are missing, not how many times they have been.** The counter
+  behind that status was added to on every publish and never reset, and a container is published
+  again on every branch switch and every refresh - so the figure was a running total over the life of
+  the language server rather than a description of the workspace. Measured on a workspace reporting
+  2461: the classpath referenced 2115 distinct jars, of which 7 were actually absent from disk. The
+  counts are now kept per project and replaced rather than accumulated, and they are recorded for
+  every project whose container was examined rather than only for those that changed, so a build that
+  produces the jars brings the number down instead of leaving it to grow.
+
 ## 0.8.5
 
 - **Code the repository generates is rebuilt when the project it belongs to changes - and only

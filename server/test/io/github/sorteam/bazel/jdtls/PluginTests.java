@@ -64,6 +64,7 @@ public final class PluginTests {
         sourceLabelsAreFilteredOutOfTheRepositoryListing();
         doctorReadsTheBazelrcAndFindsHeavyDirectories();
         doctorSpotsATruncatedJdtIndex();
+        theJarCountsDescribeTheWorkspaceRatherThanItsHistory();
         settingsReadBuildJobsAndMavenRepository();
         shuttingDownTheOwnedServerNeverWaitsForIt();
         doctorNamesTwoServersOnOneWorkspace();
@@ -1385,6 +1386,40 @@ public final class PluginTests {
         check("and is not mistaken for a busy server", !gate.isBusyWaiting(), gate.describe());
         check("and the owed retry still has a window", gate.remainingSeconds() > 0,
                 String.valueOf(gate.remainingSeconds()));
+    }
+
+    /*
+        The counters behind the status bar. A container is published again on every branch switch and
+        every refresh, so anything that adds instead of replacing turns "how many classpath entries
+        point at a file that is not on disk" into "how many times that has been true since the server
+        started" - which is how a workspace with a handful of unbuilt targets came to report
+        thousands.
+     */
+    private static void theJarCountsDescribeTheWorkspaceRatherThanItsHistory() {
+        ImportReport report = new ImportReport();
+        check("nothing recorded is nothing missing", report.getMissingJars() == 0,
+                String.valueOf(report.getMissingJars()));
+
+        report.recordJars("services.a", 100, 7, 3);
+        report.recordJars("services.b", 50, 1, 0);
+        check("projects are summed", report.getMissingJars() == 8,
+                String.valueOf(report.getMissingJars()));
+        check("and so are their resolved jars", report.getResolvedJars() == 150,
+                String.valueOf(report.getResolvedJars()));
+        check("and their source attachments", report.getJarsWithSources() == 3,
+                String.valueOf(report.getJarsWithSources()));
+
+        // The same project again: a republish describes the same jars, it does not add new ones.
+        report.recordJars("services.a", 100, 7, 3);
+        report.recordJars("services.a", 100, 7, 3);
+        check("republishing a project does not inflate the count", report.getMissingJars() == 8,
+                String.valueOf(report.getMissingJars()));
+
+        report.recordJars("services.a", 107, 0, 3);
+        check("and a build that produced them brings it down", report.getMissingJars() == 1,
+                String.valueOf(report.getMissingJars()));
+        check("while the resolved jars follow the same way", report.getResolvedJars() == 157,
+                String.valueOf(report.getResolvedJars()));
     }
 
     private static void check(String name, boolean condition, String actual) {

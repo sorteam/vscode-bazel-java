@@ -17,9 +17,17 @@ public final class ImportReport {
     private final AtomicInteger aqueryBatches = new AtomicInteger();
     private final AtomicInteger aquerySingles = new AtomicInteger();
     private final AtomicInteger cacheHits = new AtomicInteger();
-    private final AtomicInteger missingJars = new AtomicInteger();
-    private final AtomicInteger resolvedJars = new AtomicInteger();
-    private final AtomicInteger jarsWithSources = new AtomicInteger();
+    /*
+        Per project, and replaced rather than added to, because these describe a state and not a
+        history: a project's container is published again on every branch switch and every refresh,
+        and a counter that only ever grows turned "how many classpath entries point at a file that
+        is not on disk" into "how many times that has been true since the server started". On a
+        workspace with a handful of unbuilt targets it reported thousands, which reads as a broken
+        import rather than as the build it actually is.
+
+        int[] of {resolved, missing, withSources}.
+     */
+    private final Map<String, int[]> jarsByProject = new LinkedHashMap<>();
     private final AtomicInteger publishedContainers = new AtomicInteger();
     private final AtomicInteger unchangedContainers = new AtomicInteger();
     private final AtomicInteger keptStaleClasspaths = new AtomicInteger();
@@ -48,10 +56,22 @@ public final class ImportReport {
         cacheHits.incrementAndGet();
     }
 
-    public void countJars(int resolved, int missing, int withSources) {
-        resolvedJars.addAndGet(resolved);
-        missingJars.addAndGet(missing);
-        jarsWithSources.addAndGet(withSources);
+    /*
+        Recorded for every project whose container was looked at, whether or not it was republished:
+        a container that did not change still describes jars that may or may not exist, and leaving
+        it out would report only the projects that happened to move.
+     */
+    public synchronized void recordJars(String project, int resolved, int missing,
+            int withSources) {
+        jarsByProject.put(project, new int[] { resolved, missing, withSources });
+    }
+
+    private synchronized int sumOf(int index) {
+        int total = 0;
+        for (int[] counts : jarsByProject.values()) {
+            total += counts[index];
+        }
+        return total;
     }
 
     public void countContainerPublished() {
@@ -81,11 +101,11 @@ public final class ImportReport {
     }
 
     public int getMissingJars() {
-        return missingJars.get();
+        return sumOf(1);
     }
 
     public int getResolvedJars() {
-        return resolvedJars.get();
+        return sumOf(0);
     }
 
     /*
@@ -95,7 +115,7 @@ public final class ImportReport {
         everything except the repository's own targets.
      */
     public int getJarsWithSources() {
-        return jarsWithSources.get();
+        return sumOf(2);
     }
 
     public int getProvisionedProjects() {
@@ -111,11 +131,11 @@ public final class ImportReport {
         out.append("  aquery batches     : ").append(aqueryBatches.get()).append('\n');
         out.append("  aquery single-target: ").append(aquerySingles.get()).append('\n');
         out.append("  classpath cache hits: ").append(cacheHits.get()).append('\n');
-        out.append("  classpath jars     : ").append(resolvedJars.get())
-                .append(" resolved, ").append(missingJars.get()).append(" missing on disk\n");
-        out.append("  source attachments : ").append(jarsWithSources.get())
-                .append(" of ").append(resolvedJars.get());
-        if (resolvedJars.get() > 0 && jarsWithSources.get() * 2 < resolvedJars.get()) {
+        out.append("  classpath jars     : ").append(getResolvedJars())
+                .append(" resolved, ").append(getMissingJars()).append(" missing on disk\n");
+        out.append("  source attachments : ").append(getJarsWithSources())
+                .append(" of ").append(getResolvedJars());
+        if (getResolvedJars() > 0 && getJarsWithSources() * 2 < getResolvedJars()) {
             out.append(" - run 'JBazel: Fetch Library Sources' for the rest");
         }
         out.append('\n');

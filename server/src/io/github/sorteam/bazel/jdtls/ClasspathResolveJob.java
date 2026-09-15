@@ -332,6 +332,8 @@ public final class ClasspathResolveJob extends Job {
             if (container.getMissingCount() > 0) {
                 labelsWithMissingJars.addAll(request.allLabels());
             }
+            session.getReport().recordJars(projectName, container.getResolvedCount(),
+                    container.getMissingCount(), container.getSourceAttachmentCount());
             session.getReport().countContainerUnchanged();
             return false;
         }
@@ -343,7 +345,7 @@ public final class ClasspathResolveJob extends Job {
                     new NullProgressMonitor());
             session.setPublishedContainerStamp(projectName, stamp);
             session.getReport().countContainerPublished();
-            session.getReport().countJars(container.getResolvedCount(),
+            session.getReport().recordJars(projectName, container.getResolvedCount(),
                     container.getMissingCount(), container.getSourceAttachmentCount());
             if (container.getMissingCount() > 0) {
                 labelsWithMissingJars.addAll(request.allLabels());
