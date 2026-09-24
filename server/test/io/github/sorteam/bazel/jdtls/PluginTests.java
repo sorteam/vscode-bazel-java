@@ -69,6 +69,10 @@ public final class PluginTests {
         shuttingDownTheOwnedServerNeverWaitsForIt();
         doctorNamesTwoServersOnOneWorkspace();
         doctorSaysNothingAboutABundleThatIsNotLoaded();
+        aFailedBuildIsSummarisedByItsFirstError();
+        buildReasonsCoalesceIntoOneSentence();
+        theBuildStateIsWhatTheStatusBarReads();
+        aBuildReadsItsErrorsFromStderr();
         theExitWatchdogEndsAnOrphanedServer();
 
         System.out.printf("%d checks, %d failure(s)%n", checks, FAILURES.size());
@@ -1354,6 +1358,316 @@ public final class PluginTests {
         check("the maven repository is read from the repository file",
                 "maven_install".equals(configured.getMavenRepository()),
                 configured.getMavenRepository());
+    }
+
+    /* ------------------------------------------------------- classpath build */
+
+    /*
+        What the status bar says about a failed build is the first error bazel printed, and bazel
+        prints a great deal besides errors: every action's output passes through, its sign-off
+        repeats the exit code, and for a fetch failure the line that matters is the traceback under
+        the ERROR line rather than the ERROR line itself.
+     */
+    private static void aFailedBuildIsSummarisedByItsFirstError() {
+        BuildClasspathJob.Errors errors = new BuildClasspathJob.Errors();
+        List.of(
+                "INFO: Analyzed 3 targets (0 packages loaded, 0 targets configured).",
+                "ERROR: /repo/app/BUILD.bazel:3:13: Building app/libcore.jar (2 source files)"
+                        + " failed: (Exit 1): java failed: error executing Javac command"
+                        + " (from target //app:core) external/jdk/bin/java -jar builder.jar",
+                "app/src/main/java/com/example/Core.java:5: error: cannot find symbol",
+                "    Missing value;",
+                "ERROR: /repo/lib/BUILD.bazel:1:13: Building lib/libutil.jar (1 source file)"
+                        + " failed: (Exit 1)",
+                "INFO: Elapsed time: 4.211s, Critical Path: 3.02s",
+                "ERROR: Build did NOT complete successfully")
+                .forEach(errors);
+        String excerpt = errors.excerpt("bazel build failed with exit code 1");
+        check("every target bazel could not build is counted, the sign-off is not",
+                errors.count() == 2, String.valueOf(errors.count()));
+        check("the excerpt is the first error, and it names the target",
+                excerpt.startsWith("ERROR: /repo/app/BUILD.bazel:3:13:")
+                        && excerpt.contains("(from target //app:core)"),
+                excerpt);
+        check("and stops where the compiler's own output starts",
+                !excerpt.contains("cannot find symbol") && !excerpt.contains("Missing value"),
+                excerpt);
+
+        /* The regression drainStderr already fixed once: the answer is under the ERROR line. */
+        BuildClasspathJob.Errors fetch = new BuildClasspathJob.Errors();
+        List.of(
+                "ERROR: /x/coursier.bzl:678:21: An error occurred during the fetch of repository"
+                        + " 'maven': " + "detail ".repeat(100),
+                "   Traceback (most recent call last):",
+                "\t\tFile \"/x/coursier.bzl\", line 678, column 21, in _pinned_impl",
+                "Error in fail: maven_install.json contains an invalid input signature and must be"
+                        + " regenerated. please run: REPIN=1 bazel run @maven//:pin")
+                .forEach(fetch);
+        String remedy = fetch.excerpt("");
+        check("a fetch failure keeps the remedy printed under it, however long the line above",
+                remedy.contains("REPIN=1 bazel run @maven//:pin")
+                        && remedy.startsWith("ERROR: /x/coursier.bzl:678:21:"),
+                remedy);
+        check("and still fits a tooltip",
+                remedy.length() <= BuildClasspathJob.Errors.MAX_EXCERPT_CHARS + 5,
+                String.valueOf(remedy.length()));
+
+        BuildClasspathJob.Errors verbose = new BuildClasspathJob.Errors();
+        verbose.accept("ERROR: /repo/app/BUILD.bazel:3:13: Building app/libcore.jar failed:"
+                + " (Exit 1) " + "--javacopt=-Xlint ".repeat(2000));
+        String cut = verbose.excerpt("");
+        check("a whole command line is cut to what a tooltip can carry",
+                cut.length() <= BuildClasspathJob.Errors.MAX_EXCERPT_CHARS,
+                String.valueOf(cut.length()));
+        check("from the end, keeping where it happened",
+                cut.startsWith("ERROR: /repo/app/BUILD.bazel:3:13:") && cut.endsWith(" ..."), cut);
+
+        BuildClasspathJob.Errors flood = new BuildClasspathJob.Errors();
+        for (int i = 0; i < 10_000; i++) {
+            flood.accept("ERROR: //pkg" + i + ":lib failed: " + "x".repeat(200));
+            flood.accept("    at a cause line " + i);
+        }
+        check("ten thousand errors are all counted", flood.count() == 10_000,
+                String.valueOf(flood.count()));
+        check("while only the first is kept", flood.excerpt("").contains("//pkg0:lib")
+                && !flood.excerpt("").contains("//pkg1"), flood.excerpt(""));
+
+        BuildClasspathJob.Errors fatal = new BuildClasspathJob.Errors();
+        fatal.accept("FATAL: bazel ran out of memory and crashed.");
+        check("a crash reads as the error it is", fatal.count() == 1
+                && fatal.excerpt("").startsWith("FATAL: bazel ran out of memory"), fatal.excerpt(""));
+
+        BuildClasspathJob.Errors silent = new BuildClasspathJob.Errors();
+        String timeout = "bazel build --curses=no --color=no ... timed out after 3600 s";
+        check("a build that printed no error is described by what it ended with",
+                silent.count() == 0 && silent.excerpt(timeout).equals(timeout),
+                silent.excerpt(timeout));
+        String longer = silent.excerpt("bazel build " + "--flag ".repeat(500) + "timed out after 3600 s");
+        check("keeping the end of a long message, where the outcome is",
+                longer.endsWith("timed out after 3600 s")
+                        && longer.length() <= BuildClasspathJob.Errors.MAX_EXCERPT_CHARS + 5,
+                longer);
+    }
+
+    /*
+        One build stands for however many requests arrived inside the coalescing window - a
+        checkout is a delta per touched project - and the log line and the tooltip have to say why
+        in one sentence. The example is the first file, a project touched twice is one project, a
+        person asking is named first, and the kinds sit side by side rather than being folded into
+        each other.
+     */
+    private static void buildReasonsCoalesceIntoOneSentence() {
+        BuildClasspathJob.Reason one = BuildClasspathJob.Reason.fileChanged("app.core",
+                "app/core/src/main/java/com/example/Core.java");
+        check("a changed file names itself and its project",
+                one.describe().equals(
+                        "app/core/src/main/java/com/example/Core.java changed in app.core"),
+                one.describe());
+
+        BuildClasspathJob.Reason checkout = one
+                .merge(BuildClasspathJob.Reason.fileChanged("app.web",
+                        "app/web/src/main/java/com/example/Web.java"))
+                .merge(BuildClasspathJob.Reason.fileChanged("app.core",
+                        "app/core/src/main/java/com/example/Other.java"))
+                .merge(BuildClasspathJob.Reason.fileChanged("lib.util",
+                        "lib/util/src/main/java/com/example/Util.java"));
+        check("a checkout keeps its first file and counts the other projects once each",
+                checkout.describe().equals("app/core/src/main/java/com/example/Core.java changed"
+                        + " in app.core and 2 more project(s)"),
+                checkout.describe());
+
+        BuildClasspathJob.Reason asked = checkout.merge(BuildClasspathJob.Reason.command());
+        check("a person asking is named first, whatever was queued before",
+                asked.describe().startsWith("requested with 'JBazel: Build Classpath'; app/core/"),
+                asked.describe());
+
+        BuildClasspathJob.Reason missing = BuildClasspathJob.Reason.missingJars(3)
+                .merge(BuildClasspathJob.Reason.missingJars(4));
+        check("labels with missing jars add up",
+                missing.describe().equals("7 label(s) have classpath jars that are not on disk"),
+                missing.describe());
+
+        BuildClasspathJob.Reason full = BuildClasspathJob.Reason.fullBuild("app.core")
+                .merge(BuildClasspathJob.Reason.fullBuild("app.web"));
+        check("a full build has no file to name",
+                full.describe().equals("full build of app.core and 1 more project(s)"),
+                full.describe());
+        check("and a file arriving after it is still the example of its own kind",
+                full.merge(one).describe().equals("app/core/src/main/java/com/example/Core.java"
+                        + " changed in app.core; full build of app.core and 1 more project(s)"),
+                full.merge(one).describe());
+
+        check("merging nothing changes nothing",
+                BuildClasspathJob.Reason.NONE.merge(one).describe().equals(one.describe())
+                        && one.merge(BuildClasspathJob.Reason.NONE).describe()
+                                .equals(one.describe()),
+                BuildClasspathJob.Reason.NONE.merge(one).describe());
+    }
+
+    /*
+        The state the status bar reads and the shape it reads it in. extension.js tests these keys
+        for presence, so a renamed key, or a build that never stops being "running", is a status bar
+        that lies without anything failing. And the retry: a build deferred for a busy server has to
+        go back on the queue - the version that dropped it retried an empty queue.
+     */
+    @SuppressWarnings("unchecked")
+    private static void theBuildStateIsWhatTheStatusBarReads() {
+        long second = TimeUnit.SECONDS.toNanos(1);
+        BuildClasspathJob.State state = new BuildClasspathJob.State();
+        Map<String, Object> idle = state.status(0);
+        check("an idle session has nothing to show, under keys the client knows",
+                idle.containsKey("building") && idle.containsKey("buildQueued")
+                        && idle.containsKey("lastBuild") && idle.get("building") == null
+                        && idle.get("buildQueued") == null && idle.get("lastBuild") == null,
+                idle.toString());
+        check("and nothing to start", state.start(0) == null, "");
+
+        state.enqueue(List.of("//app:core", "//app:core-tests"),
+                BuildClasspathJob.Reason.fileChanged("app.core", "app/core/A.java"));
+        state.enqueue(List.of("//app:core", "//lib:util"),
+                BuildClasspathJob.Reason.fileChanged("lib.util", "lib/util/B.java"));
+        Map<String, Object> queued = (Map<String, Object>) state.status(0).get("buildQueued");
+        check("labels asked for twice are queued once",
+                queued != null && Integer.valueOf(3).equals(queued.get("targets")),
+                String.valueOf(queued));
+        check("under one reason", queued != null
+                && "app/core/A.java changed in app.core and 1 more project(s)"
+                        .equals(queued.get("reason")),
+                String.valueOf(queued));
+
+        BuildClasspathJob.Batch batch = state.start(10 * second);
+        Map<String, Object> running = state.status(55 * second);
+        Map<String, Object> building = (Map<String, Object>) running.get("building");
+        check("a started build is running and no longer queued",
+                building != null && running.get("buildQueued") == null
+                        && Integer.valueOf(3).equals(building.get("targets")),
+                running.toString());
+        check("and says for how long", building != null
+                && Long.valueOf(45).equals(building.get("elapsedSeconds")), running.toString());
+
+        state.enqueue(List.of("//lib:other"), BuildClasspathJob.Reason.command());
+        state.putBack(batch);
+        Map<String, Object> deferred = state.status(60 * second);
+        Map<String, Object> requeued = (Map<String, Object>) deferred.get("buildQueued");
+        check("a build that found the server busy is queued again, not dropped",
+                deferred.get("building") == null && requeued != null
+                        && Integer.valueOf(4).equals(requeued.get("targets")),
+                deferred.toString());
+        check("its reason merged with what arrived meanwhile", requeued != null
+                && String.valueOf(requeued.get("reason")).equals("requested with 'JBazel: Build"
+                        + " Classpath'; app/core/A.java changed in app.core and 1 more project(s)"),
+                String.valueOf(requeued));
+
+        BuildClasspathJob.Batch retried = state.start(61 * second);
+        check("and its labels still ahead of the newcomer",
+                retried.labels().equals(List.of("//app:core", "//app:core-tests", "//lib:util",
+                        "//lib:other")),
+                retried.labels().toString());
+        state.finish(retried, BuildClasspathJob.Result.failure(retried, 1_700_000_000_000L,
+                42_000, 2, "ERROR: /repo/app/BUILD.bazel:3:13: Building app/libcore.jar failed"));
+        Map<String, Object> failed = state.status(62 * second);
+        Map<String, Object> last = (Map<String, Object>) failed.get("lastBuild");
+        check("a finished build is neither running nor queued",
+                failed.get("building") == null && failed.get("buildQueued") == null,
+                failed.toString());
+        check("and a failed one says so, with its error and how many there were",
+                last != null && Boolean.TRUE.equals(last.get("failed"))
+                        && String.valueOf(last.get("error")).startsWith("ERROR: /repo/app/")
+                        && Integer.valueOf(2).equals(last.get("errors"))
+                        && Integer.valueOf(4).equals(last.get("targets")),
+                String.valueOf(last));
+        check("and when it finished, as epoch millis",
+                last != null && Long.valueOf(1_700_000_000_000L).equals(last.get("finishedAt"))
+                        && Long.valueOf(42).equals(last.get("elapsedSeconds")),
+                String.valueOf(last));
+        check("the import report says the same in a line",
+                state.describe(62 * second).startsWith("last build failed at ")
+                        && state.describe(62 * second).contains("with 2 error(s): ERROR: /repo/"),
+                state.describe(62 * second));
+
+        state.enqueue(List.of("//app:core"),
+                BuildClasspathJob.Reason.fileChanged("app.core", "app/core/A.java"));
+        BuildClasspathJob.Batch fixed = state.start(70 * second);
+        state.finish(fixed, BuildClasspathJob.Result.success(fixed, 1_700_000_100_000L, 5_000));
+        Map<String, Object> cleared = (Map<String, Object>) state.status(71 * second)
+                .get("lastBuild");
+        check("the next build that succeeds is what clears the failure",
+                cleared != null && Boolean.FALSE.equals(cleared.get("failed"))
+                        && "".equals(cleared.get("error")),
+                String.valueOf(cleared));
+
+        state.enqueue(List.of("//app:core"), BuildClasspathJob.Reason.command());
+        BuildClasspathJob.Batch interrupted = state.start(80 * second);
+        state.stopped(interrupted);
+        Map<String, Object> after = state.status(81 * second);
+        check("a build that ended without a result stops showing as running",
+                after.get("building") == null, after.toString());
+        check("and leaves the last result as it was",
+                Boolean.FALSE.equals(((Map<String, Object>) after.get("lastBuild")).get("failed")),
+                after.toString());
+    }
+
+    /*
+        Where a build's errors are. runStreaming's sink only ever sees stdout, and a build prints
+        nothing there - its ERROR lines are on stderr - so the build reads stderr through a sink of
+        its own. That sink must not be able to take the pipe down with it: a pump that dies closes
+        bazel's stderr, and the next line bazel writes ends the build it was describing. Without
+        the guard this check sees exit 141, SIGPIPE.
+     */
+    private static void aBuildReadsItsErrorsFromStderr() throws Exception {
+        Path root = Files.createTempDirectory("bazel-build-errors");
+        Path fake = root.resolve("fake-bazel.sh");
+        Files.writeString(fake, "#!/bin/sh\n"
+                + "echo 'INFO: Analyzed 2 targets' >&2\n"
+                + "echo 'ERROR: /repo/app/BUILD.bazel:3:13: Building app/libcore.jar failed:"
+                + " (Exit 1)' >&2\n"
+                + "echo 'ERROR: Build did NOT complete successfully' >&2\n"
+                + "exit 1\n");
+        fake.toFile().setExecutable(true);
+        Path noisy = root.resolve("noisy-bazel.sh");
+        Files.writeString(noisy, "#!/bin/sh\n"
+                + "i=0\n"
+                + "while [ $i -lt 20000 ]; do\n"
+                + "  echo \"INFO: line $i of a build that has a lot to say\" >&2\n"
+                + "  i=$((i + 1))\n"
+                + "done\n");
+        noisy.toFile().setExecutable(true);
+
+        System.setProperty("bazel.binary", fake.toString());
+        try {
+            BazelWorkspace workspace = new BazelWorkspace(root.toFile());
+            List<String> stdout = new ArrayList<>();
+            BuildClasspathJob.Errors errors = new BuildClasspathJob.Errors();
+            String message = "";
+            try {
+                workspace.runStreaming(null, stdout::add, errors, 10, "build", "//...");
+            } catch (org.eclipse.core.runtime.CoreException e) {
+                message = String.valueOf(e.getMessage());
+            }
+            check("a failed build still fails", message.contains("exit code 1"), message);
+            check("with nothing on stdout", stdout.isEmpty(), stdout.toString());
+            check("and its error arrives through the stderr sink",
+                    errors.count() == 1 && errors.excerpt(message)
+                            .startsWith("ERROR: /repo/app/BUILD.bazel:3:13: Building"),
+                    errors.count() + " / " + errors.excerpt(message));
+
+            System.setProperty("bazel.binary", noisy.toString());
+            BazelWorkspace chatty = new BazelWorkspace(root.toFile());
+            long started = System.nanoTime();
+            String outcome = "completed";
+            try {
+                chatty.runStreaming(null, line -> { }, line -> {
+                    throw new IllegalStateException("a sink with a bug in it");
+                }, 20, "build", "//...");
+            } catch (org.eclipse.core.runtime.CoreException e) {
+                outcome = String.valueOf(e.getMessage());
+            }
+            long millis = (System.nanoTime() - started) / 1_000_000L;
+            check("a sink that throws does not stop stderr from being read",
+                    "completed".equals(outcome) && millis < 15_000L, millis + " ms, " + outcome);
+        } finally {
+            System.clearProperty("bazel.binary");
+        }
     }
 
     /* ------------------------------------------------------------------ util */

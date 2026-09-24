@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.8.7
+
+- **A classpath build shows while it runs, and says what went wrong when it fails.** The builds this
+  extension starts - for a project whose files changed, for jars the classpath names that were never
+  produced, and for `JBazel: Build Classpath` - ran with nothing on screen, and a failure was one line
+  in the language server log. From the editor, a build that had not started yet, a build still running
+  and a build that had failed all looked the same: unresolved types. The status bar now reads
+  `JBazel: building N targets` while bazel builds, with what started it and for how long in the
+  tooltip, and `JBazel: build failed` once a build did not succeed, with how many errors bazel
+  printed and the first of them, the traceback under it included, since that is where bazel puts the
+  remedy. It stays until a build succeeds, and the import report it opens carries the same line.
+  Under `--keep_going` a build that produced most of its targets still counts as failed: the ones it
+  could not build are exactly the jars the editor is missing. Every build also logs what triggered
+  it and how many targets it covers.
+
+- **A build that finds the bazel server busy now waits and then runs, instead of quietly never
+  running.** The retry was scheduled, but the labels it was for had already left the queue, so it
+  woke up with nothing to build. The ten minutes of waiting a build is allowed were also counted over
+  the whole session rather than per build, so after enough collisions with terminal builds it stopped
+  waiting and gave up on the first busy server instead. A deferred build now goes back to the front
+  of the queue with its reason, and each build gets its own allowance.
+
 ## 0.8.6
 
 - **"N jars not built" says how many are missing, not how many times they have been.** The counter

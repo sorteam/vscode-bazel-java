@@ -62,10 +62,15 @@ Bazel extension's own `Bazel: ...` commands in the palette.
 | `JBazel: Fetch Library Sources` | Downloads the source jars of third-party artifacts, so navigating into a library shows real source |
 | `JBazel: Doctor` | One report on the things that make a repository slow, noisy or red, and the exact line to fix each |
 
-The status bar shows what is worth noticing: `JBazel: retry in Ns` when an import failed and is
-backing off, `JBazel: N jars not built` when the classpath points at jars that do not exist on disk
-yet, and a warning about `bazel-*` symlinks in the repository root, which can hang the import
-outright.
+The status bar shows what is worth noticing: `JBazel: building N targets` while a build this
+extension started is running, with what triggered it in the tooltip; `JBazel: build failed` when
+the last one did not succeed, with bazel's first error, until a build succeeds;
+`JBazel: resolving N classpaths` while bazel is asked which jars the projects compile against;
+`JBazel: waiting for another bazel command` when a terminal build holds the server;
+`JBazel: retry in Ns` when an import failed and is backing off;
+`JBazel: bazel cannot fetch a repository` when that has to be fixed by hand; and
+`JBazel: N jars not built` when the classpath points at jars that do not exist on disk yet.
+Clicking it opens the import report.
 
 ## Library sources and javadoc
 

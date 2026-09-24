@@ -204,6 +204,44 @@ function settingsAdvice() {
   return out;
 }
 
+function plural(count, noun) {
+  return `${count} ${noun}${count === 1 ? "" : "s"}`;
+}
+
+function duration(seconds) {
+  const total = Math.max(0, Math.round(seconds || 0));
+  if (total < 60) {
+    return `${total} s`;
+  }
+  const minutes = Math.floor(total / 60);
+  if (minutes < 60) {
+    return `${minutes} min ${total % 60} s`;
+  }
+  return `${Math.floor(minutes / 60)} h ${minutes % 60} min`;
+}
+
+function describeBuilding(entry) {
+  const lines = [
+    `Why: ${entry.building.reason}`,
+    `Running for ${duration(entry.building.elapsedSeconds)}.`,
+  ];
+  if (entry.buildQueued) {
+    lines.push(`${plural(entry.buildQueued.targets, "more target")} queued behind it.`);
+  }
+  return lines.join("\n");
+}
+
+function describeFailedBuild(entry) {
+  const last = entry.lastBuild;
+  const errors = last.errors > 0 ? ` with ${plural(last.errors, "error")}` : "";
+  return (
+    `The build of ${plural(last.targets, "target")} failed at ` +
+    `${new Date(last.finishedAt).toLocaleTimeString()}${errors}, so the jars of whatever it ` +
+    "could not build are missing or out of date.\n\n" +
+    `${last.error}\n\nWhy it ran: ${last.reason}`
+  );
+}
+
 function activate(context) {
   syncSettings();
   const channel = createOutputReport(context);
@@ -229,9 +267,27 @@ function activate(context) {
   /*
     Outline codicons throughout, not the solid ones. $(alert) and $(warning) are filled triangles and
     read as an error to act on right now; none of these states is that - a fetch that has to be
-    fixed, a wait on someone else's bazel, a retry, a resolve in flight, jars that were never built.
+    fixed, a wait on someone else's bazel, a retry, a resolve or a build in flight, a build that
+    failed, jars that were never built.
     The item sits next to the language server's own indicators, and matching their line weight is the
     difference between information and alarm.
+  */
+  /*
+    Precedence, for when several of these are true at once - and right after a branch switch most of
+    them are.
+
+    A fetch bazel cannot do comes first and stays first: nothing below it can finish until a person
+    fixes it. Next is a build that is running, because it is what bazel is doing at this moment -
+    while the build holds the server, "waiting for another bazel command" describes a wait that has
+    already ended, and a backoff is about the queries, not about this build. A busy server outranks a
+    build that is only queued, since the busy server is why it is queued, and its tooltip says what
+    waits behind it. A queued build outranks the backoff and the resolve so that the spinner appears
+    the moment someone asks for a build, rather than once an unrelated retry has run out.
+
+    A failed build sits below everything in motion and above the jars that were never built. Below,
+    because it is a result and not something happening: the transient states cover it for seconds,
+    and it is still there when they end. Above, because it is usually why those jars are missing, and
+    "run 'JBazel: Build Classpath'" would be advice to repeat the failure.
   */
   async function refreshStatus() {
     if (soon) {
@@ -246,6 +302,10 @@ function activate(context) {
       const resolving = entries.reduce((sum, entry) => sum + (entry.resolving || 0), 0);
       const busy = entries.some((entry) => entry.serverBusy);
       const blocked = entries.find((entry) => entry.needsFix);
+      const building = entries.filter((entry) => entry.building);
+      const queued = entries.filter((entry) => entry.buildQueued);
+      const failed = entries.filter((entry) => entry.lastBuild && entry.lastBuild.failed);
+      const queuedTargets = queued.reduce((sum, entry) => sum + entry.buildQueued.targets, 0);
       if (blocked) {
         /*
           Ahead of every transient state, because this one is not transient: bazel cannot fetch an
@@ -261,13 +321,31 @@ function activate(context) {
           "'JBazel: Refresh Classpath' retries at once.\n\n" +
           (blocked.needsFixDetail || "See the import report for the full bazel error.");
         status.show();
+      } else if (building.length > 0) {
+        const targets = building.reduce((sum, entry) => sum + entry.building.targets, 0);
+        status.text = `$(sync~spin) JBazel: building ${plural(targets, "target")}`;
+        status.tooltip =
+          "Building the jars these projects compile against. Types from code that changed, or " +
+          "that the build generates, resolve when this finishes.\n\n" +
+          building.map(describeBuilding).join("\n\n");
+        status.show();
       } else if (busy) {
         // Not an error: a terminal build holds the bazel server lock and the IDE is waiting it out.
         status.text = "$(watch) JBazel: waiting for another bazel command";
         status.tooltip =
           "A bazel command outside the IDE (usually a terminal build) holds the server lock. " +
           'The classpath refreshes when it finishes. Setting bazelJava.outputBase to "ide" ' +
-          "gives the IDE its own server so the two never queue behind each other.";
+          "gives the IDE its own server so the two never queue behind each other." +
+          (queuedTargets > 0
+            ? `\n\nA build of ${plural(queuedTargets, "target")} is queued behind it.`
+            : "");
+        status.show();
+      } else if (queued.length > 0) {
+        status.text = `$(sync~spin) JBazel: ${plural(queuedTargets, "target")} queued to build`;
+        status.tooltip =
+          "A bazel build starts in a moment: requests that arrive together are gathered into one " +
+          "build rather than started one by one.\n\n" +
+          queued.map((entry) => `Why: ${entry.buildQueued.reason}`).join("\n");
         status.show();
       } else if (backoff > 0) {
         status.text = `$(history) JBazel: retry in ${backoff}s`;
@@ -282,12 +360,34 @@ function activate(context) {
           "just pulled in resolve when this finishes.";
         status.show();
         soon = setTimeout(refreshStatus, 1500);
+      } else if (failed.length > 0) {
+        /*
+          $(sync-ignored) rather than $(error): the spinner that stood here while the build ran, with
+          a line through it. It says the build did not go through without borrowing the glyph the
+          Problems count uses, and a build that failed an hour ago is something to look into when
+          convenient, not an alarm.
+        */
+        status.text = "$(sync-ignored) JBazel: build failed";
+        status.tooltip =
+          failed.map(describeFailedBuild).join("\n\n") +
+          "\n\nThe language server log has the failure line ('Java: Open Java Language Server Log " +
+          "File'); clicking here opens the import report. This clears when a build succeeds, and " +
+          "'JBazel: Build Classpath' starts one now.";
+        status.show();
       } else if (missing > 0) {
         status.text = `$(package) JBazel: ${missing} jars not built`;
         status.tooltip = "Run 'JBazel: Build Classpath' to produce them.";
         status.show();
       } else {
         status.hide();
+      }
+      /*
+        A build in flight is polled on the short interval too, whichever state is on show while it
+        runs: its start and its end are the two moments this item exists to catch, and a build
+        queued behind a busy server starts when the other command lets go, not on the 30 s tick.
+      */
+      if (!soon && (building.length > 0 || queued.length > 0)) {
+        soon = setTimeout(refreshStatus, 1500);
       }
       offerSourcesOnce(entries);
     } catch (error) {
@@ -339,6 +439,12 @@ function activate(context) {
     }),
     vscode.commands.registerCommand("jbazel.buildClasspath", async () => {
       await showResult(await serverCommand("jbazel.buildClasspath"));
+      /*
+        At once rather than on the next tick: the build is queued by the time the command returns,
+        and a spinner that turns up half a minute after the click reads as a command that did
+        nothing.
+      */
+      refreshStatus();
     }),
     vscode.commands.registerCommand("jbazel.fetchLibrarySources", async () => {
       /*

@@ -120,6 +120,12 @@ public class BazelCommandHandler implements IDelegateCommandHandler {
                     .append(session.getDiscoveryGate().describe()).append('\n');
             out.append("  classpath gate     : ")
                     .append(session.getClasspathGate().describe()).append('\n');
+            /*
+                Here because this report is where the status bar item leads, and a click on "build
+                failed" that opened a report saying nothing about builds would be a dead end.
+             */
+            out.append("  classpath build    : ")
+                    .append(BuildClasspathJob.describe(session)).append('\n');
             out.append("  output base        : ")
                     .append(session.getSettings().hasDedicatedOutputBase()
                             ? session.getWorkspace()
@@ -144,6 +150,12 @@ public class BazelCommandHandler implements IDelegateCommandHandler {
                     || session.getDiscoveryGate().isBusyWaiting()
                     || session.getClasspathGate().isBusyWaiting());
             entry.put("resolving", ClasspathResolveJob.resolving(session));
+            /*
+                building, buildQueued and lastBuild; BuildClasspathJob.State has the shape. A type
+                that is unresolved because its jar is still being built looks exactly like one whose
+                build failed, and nothing else in this map tells the two apart.
+             */
+            entry.putAll(BuildClasspathJob.status(session));
             entry.put("missingJars", session.getReport().getMissingJars());
             entry.put("classpathJars", session.getReport().getResolvedJars());
             entry.put("jarsWithSources", session.getReport().getJarsWithSources());

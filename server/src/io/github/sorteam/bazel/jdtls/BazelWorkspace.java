@@ -38,7 +38,7 @@ public class BazelWorkspace {
     private static final int MAX_CAPTURED_ERRORS = 20;
 
     /* Per ERROR line, how much of the traceback that follows it is kept. */
-    private static final int MAX_CAUSE_LINES = 6;
+    static final int MAX_CAUSE_LINES = 6;
     private static final int MAX_DETAIL_CHARS = 900;
 
     /*
@@ -247,6 +247,20 @@ public class BazelWorkspace {
      */
     public void runStreaming(IProgressMonitor monitor, Consumer<String> sink,
             long timeoutOverrideSeconds, String... args) throws CoreException {
+        runStreaming(monitor, sink, null, timeoutOverrideSeconds, args);
+    }
+
+    /*
+        stderrSink sees every line bazel writes to stderr, as it is written and on the thread that
+        drains it. sink only ever gets stdout, which carries what a command answers with - query
+        results, aquery protos, an info value - and nothing else: a build writes nothing there, and
+        its errors, like everything else bazel says about its own progress, go to stderr. What this
+        class keeps of that is shaped for the exception message; a caller that has to say more about
+        a failure, or say it while the command still runs, reads the lines itself.
+     */
+    public void runStreaming(IProgressMonitor monitor, Consumer<String> sink,
+            Consumer<String> stderrSink, long timeoutOverrideSeconds, String... args)
+            throws CoreException {
         BazelSettings current = settings;
         List<String> command = buildCommand(current, args);
         long timeoutSeconds = timeoutOverrideSeconds > 0
@@ -270,14 +284,14 @@ public class BazelWorkspace {
                     "Another bazel command is still running after " + timeoutSeconds + " s", null));
         }
         try {
-            execute(command, sink, monitor, timeoutSeconds);
+            execute(command, sink, stderrSink, monitor, timeoutSeconds);
         } finally {
             commandLock.unlock();
         }
     }
 
-    private void execute(List<String> command, Consumer<String> sink, IProgressMonitor monitor,
-            long timeoutSeconds) throws CoreException {
+    private void execute(List<String> command, Consumer<String> sink, Consumer<String> stderrSink,
+            IProgressMonitor monitor, long timeoutSeconds) throws CoreException {
         ProcessBuilder builder = new ProcessBuilder(command);
         builder.directory(root);
         builder.redirectErrorStream(false);
@@ -292,7 +306,7 @@ public class BazelWorkspace {
 
         List<String> capturedErrors = Collections.synchronizedList(new ArrayList<>());
         AtomicReference<String> busyLine = new AtomicReference<>();
-        Thread stderrPump = drainStderr(process, capturedErrors, busyLine);
+        Thread stderrPump = drainStderr(process, capturedErrors, busyLine, stderrSink);
 
         /*
             The timeout used to be enforced only in waitFor(), after stdout hit EOF - and a bazel
@@ -435,13 +449,22 @@ public class BazelWorkspace {
         return false;
     }
 
-    private static boolean isSummary(String line) {
+    /*
+        bazel's own grammar for its stderr, in one place: whatever reads that stream - the pump
+        below, a build that reports its own failures - has to agree on what an error is, which lines
+        still belong to it and which ones only repeat the exit code.
+     */
+    static boolean isError(String line) {
+        return line.startsWith("ERROR") || line.startsWith("FATAL");
+    }
+
+    static boolean isSummary(String line) {
         return line.contains("did NOT complete successfully")
                 || line.contains("Build did NOT complete")
                 || line.endsWith("Loading failed");
     }
 
-    private static boolean isCause(String line) {
+    static boolean isCause(String line) {
         return line.startsWith(" ") || line.startsWith("\t") || line.startsWith("Error in ");
     }
 
@@ -472,17 +495,21 @@ public class BazelWorkspace {
                     ? first
                     : first + " | last: " + last;
         }
-        if (detail.length() <= MAX_DETAIL_CHARS) {
-            return detail;
+        return elideMiddle(detail, MAX_DETAIL_CHARS);
+    }
+
+    /*
+        Elided in the middle, never at the end: bazel puts the remedy last ("please run: REPIN=1
+        bazel run @maven//:pin"), and a head-only cut threw away the one line the developer needs -
+        which is what the first version of failureDetail did.
+     */
+    static String elideMiddle(String text, int max) {
+        if (text.length() <= max) {
+            return text;
         }
-        /*
-            Elided in the middle, never at the end: bazel puts the remedy last ("please run: REPIN=1
-            bazel run @maven//:pin"), and a head-only cut threw away the one line the developer needs
-            - which is what the first version of this did.
-         */
-        int head = MAX_DETAIL_CHARS / 2;
-        int tail = MAX_DETAIL_CHARS - head;
-        return detail.substring(0, head) + " ... " + detail.substring(detail.length() - tail);
+        int head = max / 2;
+        int tail = max - head;
+        return text.substring(0, head) + " ... " + text.substring(text.length() - tail);
     }
 
     private static IStatus busyError(String message) {
@@ -590,21 +617,36 @@ public class BazelWorkspace {
     }
 
     private Thread drainStderr(Process process, List<String> captured,
-            AtomicReference<String> busyLine) {
+            AtomicReference<String> busyLine, Consumer<String> sink) {
         Thread thread = new Thread(() -> {
             try (BufferedReader reader = new BufferedReader(
                     new InputStreamReader(process.getErrorStream(), StandardCharsets.UTF_8))) {
                 String line;
                 int capturing = -1;
                 int causeLines = 0;
+                boolean forwarding = sink != null;
                 while ((line = reader.readLine()) != null) {
+                    if (forwarding) {
+                        /*
+                            Nothing the caller does may end this loop. It is the only reader of the
+                            pipe, and an exception out of here closes it: the next line bazel writes
+                            to stderr then kills the command it was reporting on (measured with a
+                            shell standing in for bazel: SIGPIPE, exit 141). A sink that fails is
+                            dropped, not allowed to take the command down with it.
+                         */
+                        try {
+                            sink.accept(line);
+                        } catch (RuntimeException e) {
+                            forwarding = false;
+                        }
+                    }
                     if (line.contains(BUSY_STDERR_MARKER)) {
                         // "Another command (pid=N) is running." - printed by the client both when
                         // it exits immediately (--noblock_for_lock) and when it queues. Not an
                         // ERROR line, so it used to vanish silently while the IDE looked hung.
                         busyLine.compareAndSet(null, line.strip());
                     }
-                    if (line.startsWith("ERROR") || line.startsWith("FATAL")) {
+                    if (isError(line)) {
                         capturing = captured.size() < MAX_CAPTURED_ERRORS ? captured.size() : -1;
                         causeLines = 0;
                         if (capturing >= 0) {

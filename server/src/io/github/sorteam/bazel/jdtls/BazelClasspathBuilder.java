@@ -1,5 +1,6 @@
 package io.github.sorteam.bazel.jdtls;
 
+import java.io.File;
 import java.util.Map;
 
 import org.eclipse.core.resources.IProject;
@@ -7,6 +8,7 @@ import org.eclipse.core.resources.IResource;
 import org.eclipse.core.resources.IResourceDelta;
 import org.eclipse.core.resources.IncrementalProjectBuilder;
 import org.eclipse.core.runtime.CoreException;
+import org.eclipse.core.runtime.IPath;
 import org.eclipse.core.runtime.IProgressMonitor;
 
 /*
@@ -56,22 +58,31 @@ public class BazelClasspathBuilder extends IncrementalProjectBuilder {
             workspace's, which is what keeps even a full build scoped to the project asked about.
          */
         IResourceDelta delta = kind == FULL_BUILD ? null : getDelta(project);
-        if (delta == null || touchesInputs(delta)) {
-            BuildClasspathJob.enqueue(session, labels.allLabels());
+        if (delta == null) {
+            BuildClasspathJob.enqueue(session, labels.allLabels(),
+                    BuildClasspathJob.Reason.fullBuild(project.getName()));
+            return null;
+        }
+        IResource changed = firstChangedInput(delta);
+        if (changed != null) {
+            BuildClasspathJob.enqueue(session, labels.allLabels(),
+                    BuildClasspathJob.Reason.fileChanged(project.getName(),
+                            repositoryPath(changed, labels.rootFile())));
         }
         return null;
     }
 
     /*
-        Whether the delta contains anything the build reads. Two things are deliberately ignored:
-        derived resources, which are the compiler's own output and would make every build trigger
-        the next one; and the output folders, which are derived but not always marked so early
-        enough to rely on it.
+        The first file in the delta that the build reads, or null when there is none - the file
+        doubles as the example the status names when it says why a build is running. Two things are
+        deliberately ignored: derived resources, which are the compiler's own output and would make
+        every build trigger the next one; and the output folders, which are derived but not always
+        marked so early enough to rely on it.
      */
-    private static boolean touchesInputs(IResourceDelta delta) throws CoreException {
-        boolean[] found = new boolean[1];
+    private static IResource firstChangedInput(IResourceDelta delta) throws CoreException {
+        IResource[] found = new IResource[1];
         delta.accept(visited -> {
-            if (found[0]) {
+            if (found[0] != null) {
                 return false;
             }
             IResource resource = visited.getResource();
@@ -82,11 +93,28 @@ public class BazelClasspathBuilder extends IncrementalProjectBuilder {
                 return false;
             }
             if (resource.getType() == IResource.FILE) {
-                found[0] = true;
+                found[0] = resource;
             }
             return true;
         });
         return found[0];
+    }
+
+    /*
+        Where the file is in the repository, which is how the developer knows it. In the metadata
+        layout the path inside the project goes through a linked folder whose name the provisioner
+        made up, and names nothing anyone would recognise.
+     */
+    private static String repositoryPath(IResource resource, File root) {
+        IPath location = resource.getLocation();
+        if (location == null) {
+            return resource.getProjectRelativePath().toString();
+        }
+        String path = location.toFile().getAbsolutePath();
+        String prefix = root.getAbsolutePath() + File.separator;
+        return path.startsWith(prefix)
+                ? path.substring(prefix.length()).replace(File.separatorChar, '/')
+                : path;
     }
 
     /* The names this plugin gives a project's class output; see ProjectProvisioner. */
